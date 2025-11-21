@@ -1338,3 +1338,7 @@ const BitcoinAnalysis = () => {
     </div>
   );
 };
+
+// --- 7. MOUNT APP ---
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<BitcoinAnalysis />);
