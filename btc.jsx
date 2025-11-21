@@ -1102,6 +1102,10 @@ const App = () => {
   );
 };
 
-const rootElement = document.getElementById('root');
-const root = ReactDOM.createRoot(rootElement);
-root.render(<App />);
+const rootEl = document.getElementById('root');
+if (rootEl) {
+  const root = ReactDOM.createRoot(rootEl);
+  root.render(<App />);
+} else {
+  console.error('No #root element found');
+}
