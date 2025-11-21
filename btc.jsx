@@ -1,15 +1,54 @@
 // Use the globals provided by the UMD scripts you loaded in index.html
-const { useState, useEffect } = React;
-const { 
-  Line, LineChart, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  ReferenceLine, ReferenceArea, ComposedChart, Bar, BarChart, Label, Cell
-} = Recharts;
+const { useState, useEffect } = window.React;
 
-// Tiny helper so className still works
-const Icon = ({ children, className }) => (
+// Safely pull components off window.Recharts (with fallbacks)
+let Line, LineChart, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  ReferenceLine, ReferenceArea, ComposedChart, Bar, BarChart, Label, Cell;
+
+if (window.Recharts) {
+  ({
+    Line,
+    LineChart,
+    XAxis,
+    YAxis,
+    CartesianGrid,
+    Tooltip,
+    ResponsiveContainer,
+    ReferenceLine,
+    ReferenceArea,
+    ComposedChart,
+    Bar,
+    BarChart,
+    Label,
+    Cell,
+  } = window.Recharts);
+} else {
+  console.error(
+    "Recharts global is missing. Check the <script src='https://unpkg.com/recharts/umd/Recharts.min.js'></script> tag."
+  );
+
+  // Fallback stub components so React doesn't crash
+  const Stub = ({ children }) => (
+    <div className="p-2 text-xs text-red-500 border border-dashed border-red-400">
+      Recharts failed to load. Charts disabled.
+      {children}
+    </div>
+  );
+  Line = LineChart = XAxis = YAxis = CartesianGrid = Tooltip =
+    ResponsiveContainer = ReferenceLine = ReferenceArea =
+      ComposedChart = Bar = BarChart = Label = Cell = Stub;
+}
+
+// 👉 ADD THIS:
+const Icon = ({ children, className = '', ...rest }) => (
   <span
     className={className}
-    style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+    style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+    }}
+    {...rest}
   >
     {children}
   </span>
@@ -41,7 +80,6 @@ const Percent     = (props) => <Icon {...props}>%</Icon>;
 // --- 1. DATA FETCHING & PROXIES ---
 
 const PROXY_GENERATORS = [
-  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
   (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
   (url) => `https://thingproxy.freeboard.io/fetch/${url}`, 
   (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
