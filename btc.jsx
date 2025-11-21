@@ -20,6 +20,7 @@ const Layers        = ({ className, ...rest }) => <span className={className} {.
 const Zap           = ({ className, ...rest }) => <span className={className} {...rest}>⚡</span>;
 const Gauge         = ({ className, ...rest }) => <span className={className} {...rest}>⏱</span>;
 const BrainCircuit  = ({ className, ...rest }) => <span className={className} {...rest}>🧠</span>;
+const AlertTriangle = ({ className, ...rest }) => <span className={className} {...rest}>⚠</span>;
 
 // --- 1. DATA FETCHING ---
 const fetchMarketData = async () => {
@@ -1035,7 +1036,7 @@ const analyzeData = (data, config) => {
 };
 
 // --- 6. COMPONENT ---
-const App = () => {
+const BitcoinAnalysis = () => {
   const [selectedTimeframe, setSelectedTimeframe] = useState('medium');
   const [rawData, setRawData] = useState(null);
   const [analyses, setAnalyses] = useState(null);
