@@ -1,70 +1,227 @@
-// use React + Recharts from globals loaded in index.html
+// Use the globals provided by the UMD scripts you loaded in index.html
 const { useState, useEffect } = React;
 const { 
-  Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
+  Line, LineChart, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   ReferenceLine, ReferenceArea, ComposedChart, Bar, BarChart, Label, Cell
 } = Recharts;
 
-// minimal icon stubs so we don't need lucide-react at all
-const Activity      = ({ className, ...rest }) => <span className={className} {...rest}>⚡</span>;
-const ArrowUp       = ({ className, ...rest }) => <span className={className} {...rest}>▲</span>;
-const ArrowDown     = ({ className, ...rest }) => <span className={className} {...rest}>▼</span>;
-const RefreshCw     = ({ className, ...rest }) => <span className={className} {...rest}>⟳</span>;
-const AlignLeft     = ({ className, ...rest }) => <span className={className} {...rest}>☰</span>;
-const BarChart2     = ({ className, ...rest }) => <span className={className} {...rest}>📊</span>;
-const TrendingUp    = ({ className, ...rest }) => <span className={className} {...rest}>📈</span>;
-const TrendingDown  = ({ className, ...rest }) => <span className={className} {...rest}>📉</span>;
-const Filter        = ({ className, ...rest }) => <span className={className} {...rest}>⚙</span>;
-const History       = ({ className, ...rest }) => <span className={className} {...rest}>🕒</span>;
-const Layers        = ({ className, ...rest }) => <span className={className} {...rest}>🧱</span>;
-const Zap           = ({ className, ...rest }) => <span className={className} {...rest}>⚡</span>;
-const Gauge         = ({ className, ...rest }) => <span className={className} {...rest}>⏱</span>;
-const BrainCircuit  = ({ className, ...rest }) => <span className={className} {...rest}>🧠</span>;
-const AlertTriangle = ({ className, ...rest }) => <span className={className} {...rest}>⚠</span>;
+// Tiny helper so className still works
+const Icon = ({ children, className }) => (
+  <span
+    className={className}
+    style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+  >
+    {children}
+  </span>
+);
 
-// --- 1. DATA FETCHING ---
+const Activity    = (props) => <Icon {...props}>📈</Icon>;
+const ArrowUp     = (props) => <Icon {...props}>⬆️</Icon>;
+const ArrowDown   = (props) => <Icon {...props}>⬇️</Icon>;
+const RefreshCw   = (props) => <Icon {...props}>🔄</Icon>;
+const AlignLeft   = (props) => <Icon {...props}>≡</Icon>;
+const BarChart2   = (props) => <Icon {...props}>📊</Icon>;
+const TrendingUp  = (props) => <Icon {...props}>📈</Icon>;
+const TrendingDown= (props) => <Icon {...props}>📉</Icon>;
+const History     = (props) => <Icon {...props}>🕒</Icon>;
+const Layers      = (props) => <Icon {...props}>🧱</Icon>;
+const Zap         = (props) => <Icon {...props}>⚡</Icon>;
+const Gauge       = (props) => <Icon {...props}>🧭</Icon>;
+const BrainCircuit= (props) => <Icon {...props}>🧠</Icon>;
+const AlertTriangle=(props) => <Icon {...props}>⚠️</Icon>;
+const Users       = (props) => <Icon {...props}>👥</Icon>;
+const DollarSign  = (props) => <Icon {...props}>💲</Icon>;
+const Target      = (props) => <Icon {...props}>🎯</Icon>;
+const WifiOff     = (props) => <Icon {...props}>📵</Icon>;
+const Timer       = (props) => <Icon {...props}>⏱️</Icon>;
+const Clock       = (props) => <Icon {...props}>🕒</Icon>;
+const Percent     = (props) => <Icon {...props}>%</Icon>;
+
+
+// --- 1. DATA FETCHING & PROXIES ---
+
+const PROXY_GENERATORS = [
+  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+  (url) => `https://thingproxy.freeboard.io/fetch/${url}`, 
+  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
+];
+
+async function fetchJson(targetUrl) {
+  const urlWithTime = `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}t=${Date.now()}`;
+  let lastError = null;
+
+  for (const generateProxyUrl of PROXY_GENERATORS) {
+    try {
+      const proxyUrl = generateProxyUrl(urlWithTime);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000); 
+
+      const res = await fetch(proxyUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      if (res.ok) return await res.json();
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  return null;
+}
+
+// Fetch Historical Funding
+async function fetchFundingHistory() {
+  try {
+    const data = await fetchJson('https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1000');
+    const history = {};
+    if (Array.isArray(data)) {
+        data.forEach(d => {
+            const dateStr = new Date(d.fundingTime).toISOString().split('T')[0];
+            if (!history[dateStr]) history[dateStr] = [];
+            history[dateStr].push(parseFloat(d.fundingRate));
+        });
+    }
+    return history;
+  } catch(e) {
+    return {};
+  }
+}
+
+// Fetch Real-Time Funding
+async function fetchRealTimeFunding() {
+  try {
+    const data = await fetchJson('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT');
+    if (data && data.lastFundingRate) {
+        return {
+            rate: parseFloat(data.lastFundingRate),
+            nextTime: parseInt(data.nextFundingTime),
+            annualized: parseFloat(data.lastFundingRate) * 3 * 365 
+        };
+    }
+    return null;
+  } catch(e) {
+    return null;
+  }
+}
+
+// Historical Data
 const fetchMarketData = async () => {
   try {
-    const response = await fetch(`https://min-api.cryptocompare.com/data/v2/histoday?fsym=BTC&tsym=USD&limit=2000`);
-    const json = await response.json();
-    if (json.Response !== 'Success') throw new Error(json.Message);
+    let priceData = null;
+    const priceUrl = `https://min-api.cryptocompare.com/data/v2/histoday?fsym=BTC&tsym=USD&limit=2000`;
     
+    try {
+        const res = await fetch(priceUrl);
+        if (res.ok) {
+            const json = await res.json();
+            if (json.Response === 'Success') priceData = json.Data.Data;
+        }
+    } catch (e) {}
+
+    if (!priceData) {
+        const json = await fetchJson(priceUrl);
+        if (json && json.Response === 'Success') priceData = json.Data.Data;
+    }
+
+    if (!priceData) return null;
+
+    const fundingHistory = await fetchFundingHistory();
+
     const cleanData = [];
-    json.Data.Data.forEach((d, i) => {
+    priceData.forEach((d, i) => {
       if (Number.isFinite(d.close) && Number.isFinite(d.volumeto) && d.close > 0) {
+        const dateStr = new Date(d.time * 1000).toISOString().split('T')[0];
+        let dailyFund = 0.0001;
+        if (fundingHistory[dateStr]) {
+             const rates = fundingHistory[dateStr];
+             dailyFund = rates.reduce((a,b)=>a+b,0) / rates.length;
+        }
+
         cleanData.push({
-          date: new Date(d.time * 1000).toISOString().split('T')[0],
+          date: dateStr,
           index: i,
-          open: d.open, high: d.high, low: d.low, close: d.close, volume: d.volumeto 
+          open: d.open, high: d.high, low: d.low, close: d.close, volume: d.volumeto,
+          fundingRate: dailyFund
         });
       }
     });
     return cleanData;
   } catch (err) {
-    console.error("Fetch failed", err);
     return null;
   }
 };
 
+// Derivatives Snapshot
+async function fetchBinanceGlobal() {
+  try {
+    const data = await fetchJson('https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=BTCUSDT&period=5m&limit=1');
+    if (!Array.isArray(data) || data.length === 0) return null;
+    const last = data[data.length - 1];
+    return { longPct: Number(last.longAccount), shortPct: Number(last.shortAccount), ratio: Number(last.longShortRatio) };
+  } catch(e) { return null; }
+}
+
+async function fetchBinanceTop() {
+  try {
+    const [acc, pos] = await Promise.all([
+      fetchJson('https://fapi.binance.com/futures/data/topLongShortAccountRatio?symbol=BTCUSDT&period=5m&limit=1'),
+      fetchJson('https://fapi.binance.com/futures/data/topLongShortPositionRatio?symbol=BTCUSDT&period=5m&limit=1'),
+    ]);
+    if (!Array.isArray(acc) || !Array.isArray(pos)) return null;
+    const lastAcc = acc[acc.length - 1];
+    const lastPos = pos[pos.length - 1];
+    
+    const safeLongAcc = Number(lastAcc?.longAccount ?? lastAcc?.longQty ?? 0);
+    const safeShortAcc = Number(lastAcc?.shortAccount ?? lastAcc?.shortQty ?? 0);
+    const safeLongPos = Number(lastPos?.longAccount ?? lastPos?.longQty ?? 0);
+    const safeShortPos = Number(lastPos?.shortAccount ?? lastPos?.shortQty ?? 0);
+
+    return {
+      accounts: { longPct: safeLongAcc, shortPct: safeShortAcc, ratio: Number(lastAcc?.longShortRatio || 0) },
+      positions: { longPct: safeLongPos, shortPct: safeShortPos, ratio: Number(lastPos?.longShortRatio || 0) }
+    };
+  } catch(e) { return null; }
+}
+
+async function fetchBybit() {
+  try {
+      const json = await fetchJson('https://api.bybit.com/v5/market/account-ratio?category=linear&symbol=BTCUSDT&period=5min&limit=1');
+      const item = json?.result?.list?.[0];
+      if (!item) return null;
+      const buy = Number(item.buyRatio);
+      const sell = Number(item.sellRatio);
+      return { longPct: buy, shortPct: sell, ratio: sell > 0 ? buy / sell : 0 };
+  } catch(e) { return null; }
+}
+
 // --- 2. MATH UTILS ---
+const smartRound = (num) => {
+    if (!num) return 0;
+    if (num > 10000) return Math.round(num / 50) * 50; 
+    if (num > 1000) return Math.round(num / 10) * 10;
+    return Math.round(num * 100) / 100;
+};
+
+const formatPercent = (val) => (val === undefined || val === null || !Number.isFinite(val)) ? '-' : `${(val * 100).toFixed(4)}%`;
+
+const getCountDown = (target) => {
+    if (!target) return '-';
+    const diff = target - Date.now();
+    if (diff <= 0) return 'Settling...';
+    const hours = Math.floor(diff / (1000 * 60 * 60));
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    return `${hours}h ${minutes}m`;
+};
+
 const linearRegression = (x, y) => {
   const n = x.length;
   if (n < 2) return { slope: 0, intercept: 0, rSquared: 0 };
-  
   const sumX = x.reduce((a, b) => a + b, 0);
   const sumY = y.reduce((a, b) => a + b, 0);
   const sumXY = x.reduce((sum, xi, i) => sum + xi * y[i], 0);
   const sumXX = x.reduce((sum, xi) => sum + xi * xi, 0);
-  
   const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX || 1);
   const intercept = (sumY - slope * sumX) / n;
-
-  const avgY = sumY / n;
-  const ssTot = y.reduce((sum, yi) => sum + Math.pow(yi - avgY, 2), 0);
-  const ssRes = y.reduce((sum, yi, i) => sum + Math.pow(yi - (slope * x[i] + intercept), 2), 0);
-  const rSquared = ssTot === 0 ? 0 : 1 - (ssRes / ssTot);
-
-  return { slope, intercept, rSquared };
+  return { slope, intercept };
 };
 
 const calculateSigma = (x, y, slope, intercept) => {
@@ -77,7 +234,6 @@ const calculateSigma = (x, y, slope, intercept) => {
 const calculateRobustTrend = (indices, logPrices) => {
   const p1 = linearRegression(indices, logPrices);
   const s1 = calculateSigma(indices, logPrices, p1.slope, p1.intercept);
-  
   const fX = [], fY = [];
   for(let i=0; i<indices.length; i++) {
     const pred = p1.slope * indices[i] + p1.intercept;
@@ -85,188 +241,145 @@ const calculateRobustTrend = (indices, logPrices) => {
       fX.push(indices[i]); fY.push(logPrices[i]);
     }
   }
-  
-  if (fX.length < indices.length * 0.5) {
-      return { slope: p1.slope, intercept: p1.intercept, sigma: s1, rSquared: p1.rSquared };
-  }
-
+  if (fX.length < indices.length * 0.5) return { slope: p1.slope, intercept: p1.intercept, sigma: s1, rSquared: p1.rSquared };
   const p2 = linearRegression(fX, fY);
   const s2 = calculateSigma(fX, fY, p2.slope, p2.intercept);
-  
   return { slope: p2.slope, intercept: p2.intercept, sigma: s2, rSquared: p2.rSquared };
 };
 
 const calculateRSI = (prices, period = 14) => {
-  if (prices.length <= period) return 50;
+  if (prices.length <= period) return new Array(prices.length).fill(50);
   let gains = 0, losses = 0;
+  const rsi = new Array(prices.length).fill(50);
+  
   for (let i = 1; i <= period; i++) {
     const diff = prices[i] - prices[i - 1];
     if (diff >= 0) gains += diff; else losses -= diff;
   }
   let avgGain = gains / period;
   let avgLoss = losses / period;
+  
   for (let i = period + 1; i < prices.length; i++) {
     const diff = prices[i] - prices[i - 1];
     const currentGain = diff > 0 ? diff : 0;
     const currentLoss = diff < 0 ? -diff : 0;
     avgGain = ((avgGain * (period - 1)) + currentGain) / period;
     avgLoss = ((avgLoss * (period - 1)) + currentLoss) / period;
+    if (avgLoss === 0) rsi[i] = 100;
+    else {
+        const rs = avgGain / avgLoss;
+        rsi[i] = 100 - (100 / (1 + rs));
+    }
   }
-  if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - (100 / (1 + rs));
+  return rsi;
 };
 
-// Unified ATR Calculation (Series)
 const calculateATRSeries = (data, period = 14) => {
   const n = data.length;
   const atrs = new Array(n).fill(0);
-  if (n <= period) return atrs;
-
   let trSum = 0;
-  for (let i = 1; i <= period; i++) {
+  for (let i = 1; i <= period && i < n; i++) {
     const high = data[i].high;
     const low = data[i].low;
     const prevClose = data[i - 1].close;
-    const tr = Math.max(
-      high - low,
-      Math.abs(high - prevClose),
-      Math.abs(low - prevClose)
-    );
-    trSum += tr;
+    trSum += Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
   }
-
   let atr = trSum / period;
   atrs[period] = atr;
-
   for (let i = period + 1; i < n; i++) {
-    const high = data[i].high;
-    const low = data[i].low;
-    const prevClose = data[i - 1].close;
-    const tr = Math.max(
-      high - low,
-      Math.abs(high - prevClose),
-      Math.abs(low - prevClose)
-    );
-    atr = ((atr * (period - 1)) + tr) / period;
-    atrs[i] = atr;
+    const high = data[i].high; const low = data[i].low; const prevClose = data[i - 1].close;
+    const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
+    atrs[i] = ((atrs[i-1] * (period - 1)) + tr) / period;
   }
-
   return atrs;
 };
 
-// MACD Calculation
 const calculateEMA = (data, period) => {
+  if (data.length === 0) return [];
   const k = 2 / (period + 1);
-  let ema = data[0];
-  const res = [ema];
-  for (let i = 1; i < data.length; i++) {
-    ema = data[i] * k + ema * (1 - k);
-    res.push(ema);
+  const res = new Array(data.length).fill(null);
+  let sum = 0;
+  for(let i=0; i<period; i++) sum += data[i];
+  res[period-1] = sum / period;
+  for (let i = period; i < data.length; i++) {
+    res[i] = data[i] * k + res[i-1] * (1 - k);
   }
   return res;
 };
 
-const calculateMACD = (prices, fast = 12, slow = 26, signal = 9) => {
-  if (prices.length < slow) return new Array(prices.length).fill({ macd: 0, signal: 0, histogram: 0 });
-  
-  const fastEMA = calculateEMA(prices, fast);
-  const slowEMA = calculateEMA(prices, slow);
-  
-  const macdLine = fastEMA.map((f, i) => f - slowEMA[i]);
-  const signalLine = calculateEMA(macdLine, signal);
-  
-  return macdLine.map((m, i) => ({
-    macd: m,
-    signal: signalLine[i],
-    histogram: m - signalLine[i]
-  }));
+const calculateSMA = (data, period) => {
+    if (data.length < period) return new Array(data.length).fill(null);
+    const res = new Array(data.length).fill(null);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+        sum += data[i];
+        if (i >= period) sum -= data[i - period];
+        if (i >= period - 1) res[i] = sum / period;
+    }
+    for (let i = 1; i < res.length; i++) {
+        if (res[i] === null && res[i-1] !== null && i > data.length - period) res[i] = res[i-1]; 
+    }
+    return res;
 };
 
-// --- ADX Calculation with Directional Movement ---
-const calculateADX = (data, period = 14) => {
-    if (data.length < period * 2) return { adx: 0, diPlus: 0, diMinus: 0, adxSeries: [] };
+const calculateMACD = (prices, fast = 12, slow = 26, signal = 9) => {
+  const fastEMA = calculateEMA(prices, fast);
+  const slowEMA = calculateEMA(prices, slow);
+  const macdLine = prices.map((_, i) => (fastEMA[i] !== null && slowEMA[i] !== null) ? fastEMA[i] - slowEMA[i] : 0);
+  const validMacdStart = slow - 1;
+  const validMacdValues = macdLine.slice(validMacdStart);
+  const validSignalValues = calculateEMA(validMacdValues, signal);
+  const signalLine = new Array(prices.length).fill(0);
+  for(let i=0; i<validSignalValues.length; i++) signalLine[i + validMacdStart] = validSignalValues[i] || 0;
+  return macdLine.map((m, i) => ({ macd: m, signal: signalLine[i], histogram: m - signalLine[i] }));
+};
 
+const calculateADX = (data, period = 14) => {
+    if (data.length < period * 2) return { adx: 0, diPlus: 0, diMinus: 0, adxSeries: [], slope: 0 };
     let tr = [], dmPlus = [], dmMinus = [];
-    
     for(let i=1; i<data.length; i++) {
-        const high = data[i].high;
-        const low = data[i].low;
-        const prevClose = data[i-1].close;
-        
+        const high = data[i].high; const low = data[i].low; const prevClose = data[i-1].close;
         tr.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
-        
         const upMove = data[i].high - data[i-1].high;
         const downMove = data[i-1].low - data[i].low;
-        
         dmPlus.push((upMove > downMove && upMove > 0) ? upMove : 0);
         dmMinus.push((downMove > upMove && downMove > 0) ? downMove : 0);
     }
-
     const smooth = (arr, per) => {
-        let res = [];
-        let sum = 0;
+        let res = []; let sum = 0;
         for(let i=0; i<per; i++) sum += arr[i];
         res.push(sum); 
-        for(let i=per; i<arr.length; i++) {
-            res.push(res[res.length-1] - (res[res.length-1]/per) + arr[i]);
-        }
+        for(let i=per; i<arr.length; i++) res.push(res[res.length-1] - (res[res.length-1]/per) + arr[i]);
         return res;
     };
-
-    const str = smooth(tr, period);
-    const spdm = smooth(dmPlus, period);
-    const smdm = smooth(dmMinus, period);
-
+    const str = smooth(tr, period); const spdm = smooth(dmPlus, period); const smdm = smooth(dmMinus, period);
     let dx = [];
     for(let i=0; i<str.length; i++) {
-        const diPlus = 100 * (spdm[i] / str[i]);
-        const diMinus = 100 * (smdm[i] / str[i]);
-        const sum = diPlus + diMinus;
-        if (sum === 0) dx.push(0);
-        else dx.push(100 * Math.abs(diPlus - diMinus) / sum);
+        const sum = spdm[i] + smdm[i];
+        dx.push(sum === 0 ? 0 : 100 * Math.abs((spdm[i] - smdm[i]) / sum));
     }
-
-    let adx = [];
-    let adxSum = 0;
+    let adx = []; let adxSum = 0;
     for(let i=0; i<period; i++) adxSum += dx[i];
     adx.push(adxSum / period);
+    for(let i=period; i<dx.length; i++) adx.push((adx[adx.length-1] * (period-1) + dx[i]) / period);
     
-    for(let i=period; i<dx.length; i++) {
-        adx.push((adx[adx.length-1] * (period-1) + dx[i]) / period);
-    }
-    
-    // Pad ADX series to match data length (approx)
     const offset = data.length - adx.length;
     const adxSeries = new Array(offset).fill(0).concat(adx);
-
+    const slope = adx.length > 5 ? adx[adx.length-1] - adx[adx.length-5] : 0;
     const last = str.length - 1;
-    const diPlusLast = 100 * (spdm[last] / str[last]);
-    const diMinusLast = 100 * (smdm[last] / str[last]);
-
-    return {
-      adx: adx[adx.length-1],
-      diPlus: diPlusLast,
-      diMinus: diMinusLast,
-      adxSeries
-    };
+    const denom = str[last] || 1e-9; 
+    return { adx: adx[adx.length-1], diPlus: 100 * (spdm[last] / denom), diMinus: 100 * (smdm[last] / denom), adxSeries, slope };
 };
 
-
-// --- 3. VOLUME PROFILE & PATTERNS ---
+// --- 3. PATTERNS ---
 const calculateVolumeProfile = (data, buckets = 24) => {
   if (!data || data.length === 0) return [];
   const minPrice = Math.min(...data.map(d => d.low));
   const maxPrice = Math.max(...data.map(d => d.high));
-  const range = maxPrice - minPrice;
-  const step = range / buckets || 1;
-  
+  const step = (maxPrice - minPrice) / buckets || 1;
   const profile = Array.from({ length: buckets }, (_, i) => ({
-    priceStart: minPrice + i * step,
-    priceEnd: minPrice + (i + 1) * step,
-    volume: 0
+    priceStart: minPrice + i * step, priceEnd: minPrice + (i + 1) * step, volume: 0, mid: (minPrice + i * step + minPrice + (i + 1) * step) / 2
   }));
-
   data.forEach(d => {
     const price = (d.close + d.high + d.low) / 3;
     const bucketIndex = Math.min(Math.floor((price - minPrice) / step), buckets - 1);
@@ -276,7 +389,7 @@ const calculateVolumeProfile = (data, buckets = 24) => {
 };
 
 const getVolumeStrength = (price, profile) => {
-    if (!profile.length) return 1;
+    if (!profile || !profile.length) return 1;
     const bucket = profile.find(p => price >= p.priceStart && price <= p.priceEnd);
     if (!bucket) return 1;
     const maxVol = Math.max(...profile.map(p => p.volume));
@@ -286,940 +399,578 @@ const getVolumeStrength = (price, profile) => {
 const findPatterns = (data, windowSize) => {
   const len = data.length;
   const highs = [], lows = [];
-
+  // SAFE LOOP
   for (let i = windowSize; i < len - windowSize; i++) {
     const current = data[i];
     let isHigh = true, isLow = true;
     for (let j = 1; j <= windowSize; j++) {
+      if (!data[i-j] || !data[i+j]) continue; 
       if (data[i - j].high > current.high || data[i + j].high > current.high) isHigh = false;
       if (data[i - j].low < current.low || data[i + j].low < current.low) isLow = false;
     }
     if (isHigh) highs.push({ ...current, type: 'resistance', localIndex: i });
     if (isLow) lows.push({ ...current, type: 'support', localIndex: i });
   }
-
-  const majorHighs = highs.filter((h, idx) => {
-      const prev = highs[idx-1], next = highs[idx+1];
-      if (!prev && !next) return true;
-      if (!prev) return h.high >= next.high;
-      if (!next) return h.high >= prev.high;
-      return h.high >= prev.high && h.high >= next.high;
-  });
   
-  const majorLows = lows.filter((l, idx) => {
-      const prev = lows[idx-1], next = lows[idx+1];
-      if (!prev && !next) return true;
-      if (!prev) return l.low <= next.low;
-      if (!next) return l.low <= prev.low;
-      return l.low <= prev.low && l.low <= next.low;
-  });
-
-  const avgRecentVol = data.slice(-50).reduce((s, x) => s + x.volume, 0) / Math.max(1, Math.min(50, data.length));
-
-  let resLine = null, supLine = null;
-  const signals = [];
-
-  // --- PRIMARY SIGNAL ENGINE: BREAKOUTS ---
-  if (majorHighs.length >= 2) {
-    const p2 = majorHighs[majorHighs.length - 1];
-    const p1 = majorHighs[majorHighs.length - 2];
-    if (p2.localIndex !== p1.localIndex) {
-        const slope = (p2.high - p1.high) / (p2.localIndex - p1.localIndex);
-        // Looser slope tolerance for finding "Roughly Horizontal" resistance
-        if (slope <= 0.002 * p2.high / 100) {
-            resLine = { p1, p2, slope };
-            const startScan = p2.localIndex + 1;
-            for (let i = startScan; i < len; i++) {
-                const d = data[i];
-                const proj = p2.high + slope * (i - p2.localIndex);
-                // Looser Breakout: 0.5% break, 0.8x Volume
-                if (d.close > proj * 1.005 && d.volume > 0.8 * avgRecentVol) {
-                    if (!signals.some(s => Math.abs(s.localIndex - i) < 10 && s.type === 'buy')) {
-                        signals.push({ type: 'buy', price: d.close, localIndex: i, label: 'BO', volRatio: d.volume/avgRecentVol });
-                    }
-                }
-            }
-        }
-    }
-  }
-  
-  if (majorLows.length >= 2) {
-    const p2 = majorLows[majorLows.length - 1];
-    const p1 = majorLows[majorLows.length - 2];
-    if (p2.localIndex !== p1.localIndex) {
-        const slope = (p2.low - p1.low) / (p2.localIndex - p1.localIndex);
-        if (slope >= -0.002 * p2.low / 100) {
-            supLine = { p1, p2, slope };
-            const startScan = p2.localIndex + 1;
-            for (let i = startScan; i < len; i++) {
-                const d = data[i];
-                const proj = p2.low + slope * (i - p2.localIndex);
-                if (d.close < proj * 0.995 && d.volume > 0.8 * avgRecentVol) {
-                    if (!signals.some(s => Math.abs(s.localIndex - i) < 10 && s.type === 'sell')) {
-                        signals.push({ type: 'sell', price: d.close, localIndex: i, label: 'BD', volRatio: d.volume/avgRecentVol });
-                    }
-                }
-            }
-        }
-    }
-  }
-
-  let avgPivotVol = 0.025; 
-  const allPivots = [...highs, ...lows];
-  if (allPivots.length > 0) {
-    const volSum = allPivots.reduce((sum, p) => sum + ((p.high - p.low) / p.close), 0);
-    const rawVol = volSum / allPivots.length;
-    avgPivotVol = Math.max(0.01, Math.min(0.05, rawVol * 2)); 
-  }
-
   const clusterPivots = (pivots, tolerance, type) => {
       if (pivots.length === 0) return [];
       const sorted = [...pivots].sort((a,b) => type === 'high' ? a.high - b.high : a.low - b.low);
       const clusters = [];
       let curr = [sorted[0]];
-      
       for(let i=1; i<sorted.length; i++) {
           const val = type === 'high' ? sorted[i].high : sorted[i].low;
           const prevVal = type === 'high' ? curr[curr.length-1].high : curr[curr.length-1].low;
-          const pctDiff = (val - prevVal) / prevVal;
-          
-          if (pctDiff < tolerance) {
-              curr.push(sorted[i]);
-          } else {
-              clusters.push(curr);
-              curr = [sorted[i]];
-          }
+          if ((val - prevVal) / prevVal < tolerance) curr.push(sorted[i]);
+          else { clusters.push(curr); curr = [sorted[i]]; }
       }
       clusters.push(curr);
-      
       return clusters.map(c => {
           const avgPrice = Math.round(c.reduce((s,x)=> s + (type === 'high' ? x.high : x.low), 0) / c.length);
           let score = 0;
-          c.forEach(p => {
-              const recency = (len - p.localIndex) < (len * 0.15) ? 3 : 1;
-              score += recency;
-          });
-          score += c.length;
-          const minIndex = Math.min(...c.map(p => p.localIndex));
-          return { price: avgPrice, strength: score, type, minIndex };
+          c.forEach(p => { score += (len - p.localIndex) < (len * 0.15) ? 3 : 1; });
+          return { price: avgPrice, strength: score + c.length, type, minIndex: Math.min(...c.map(p => p.localIndex)) };
       }).sort((a,b) => b.strength - a.strength);
   };
 
-  const resLevels = clusterPivots(highs, avgPivotVol, 'high');
-  const supLevels = clusterPivots(lows, avgPivotVol, 'low');
+  // Formation Lines (Relaxed slope check for visibility)
+  let resLine = null, supLine = null;
+  const majorHighs = highs.filter((h, idx) => {
+      const prev = highs[idx-1];
+      const next = highs[idx+1];
+      if (!prev || !next) return false;
+      return h.high >= prev.high && h.high >= next.high;
+  });
+  const majorLows = lows.filter((l, idx) => {
+      const prev = lows[idx-1];
+      const next = lows[idx+1];
+      if (!prev || !next) return false;
+      return l.low <= prev.low && l.low <= next.low;
+  });
 
-  return { majorHighs, majorLows, resLine, supLine, signals, resLevels, supLevels };
-};
-
-// --- FIBONACCI ENGINE ---
-const FIB_LEVELS = [0.382, 0.5, 0.618];
-
-const findFibSwing = (data, patterns) => {
-  const lastHigh = patterns.majorHighs[patterns.majorHighs.length - 1];
-  const lastLow = patterns.majorLows[patterns.majorLows.length - 1];
-
-  if (lastHigh && lastLow) {
-    if (lastHigh.localIndex > lastLow.localIndex) {
-      return {
-        dir: 'up',
-        swingHigh: lastHigh.high,
-        swingLow: lastLow.low,
-        startIndex: lastLow.localIndex,
-        endIndex: lastHigh.localIndex
-      };
-    } else if (lastLow.localIndex > lastHigh.localIndex) {
-      return {
-        dir: 'down',
-        swingHigh: lastHigh.high,
-        swingLow: lastLow.low,
-        startIndex: lastHigh.localIndex,
-        endIndex: lastLow.localIndex
-      };
+  const slopeTolerance = 5000; 
+  if (majorHighs.length >= 2) {
+    const p2 = majorHighs[majorHighs.length - 1];
+    const p1 = majorHighs[majorHighs.length - 2];
+    if (p2.localIndex !== p1.localIndex) {
+        const slope = (p2.high - p1.high) / (p2.localIndex - p1.localIndex);
+        if (Math.abs(slope) < slopeTolerance) resLine = { p1, p2, slope }; 
+    }
+  }
+  if (majorLows.length >= 2) {
+    const p2 = majorLows[majorLows.length - 1];
+    const p1 = majorLows[majorLows.length - 2];
+    if (p2.localIndex !== p1.localIndex) {
+        const slope = (p2.low - p1.low) / (p2.localIndex - p1.localIndex);
+        if (Math.abs(slope) < slopeTolerance) supLine = { p1, p2, slope };
     }
   }
 
-  if (data.length === 0) return { dir: 'none' };
+  // FIX: Return filtered major highs/lows for dots
+  return { 
+    majorHighs, 
+    majorLows, 
+    signals: [], 
+    resLevels: clusterPivots(highs, 0.03, 'high'), 
+    supLevels: clusterPivots(lows, 0.03, 'low'), 
+    resLine, 
+    supLine 
+  };
+};
 
+// --- FIBONACCI & BACKTEST ---
+const FIB_LEVELS = [0.382, 0.5, 0.618];
+const findFibSwing = (data, patterns) => {
+  if (data.length === 0) return { dir: 'none' };
   let maxIdx = 0, minIdx = 0;
   for (let i = 1; i < data.length; i++) {
     if (data[i].high > data[maxIdx].high) maxIdx = i;
     if (data[i].low < data[minIdx].low) minIdx = i;
   }
-
-  if (maxIdx > minIdx) {
-    return {
-      dir: 'up',
-      swingHigh: data[maxIdx].high,
-      swingLow: data[minIdx].low,
-      startIndex: minIdx,
-      endIndex: maxIdx
-    };
-  } else if (minIdx > maxIdx) {
-    return {
-      dir: 'down',
-      swingHigh: data[maxIdx].high,
-      swingLow: data[minIdx].low,
-      startIndex: maxIdx,
-      endIndex: minIdx
-    };
-  }
-
-  return { dir: 'none' };
+  if (maxIdx > minIdx) return { dir: 'up', swingHigh: data[maxIdx].high, swingLow: data[minIdx].low, startIndex: minIdx, endIndex: maxIdx };
+  else return { dir: 'down', swingHigh: data[maxIdx].high, swingLow: data[minIdx].low, startIndex: maxIdx, endIndex: minIdx };
 };
 
 const calculateFibLevels = (swing) => {
   if (!swing || swing.dir === 'none') return [];
-  const { swingHigh, swingLow, dir } = swing;
-  const diff = swingHigh - swingLow;
+  const diff = swing.swingHigh - swing.swingLow;
   if (diff <= 0) return [];
-
-  return FIB_LEVELS.map(ratio => {
-    let price;
-    if (dir === 'up') price = swingHigh - diff * ratio;
-    else price = swingLow + diff * ratio;
-    return { ratio, price };
-  });
+  return FIB_LEVELS.map(ratio => ({ ratio, price: swing.dir === 'up' ? swing.swingHigh - diff * ratio : swing.swingLow + diff * ratio }));
 };
 
-// --- 4. TRADE & BACKTEST ENGINE ---
-
-const calculateTradeSetups = (
-  currentPrice, 
-  supports, 
-  resistances, 
-  atr, 
-  score = 0, 
-  macdData = null,
-  regime = 'RANGING' 
-) => {
-    const sortedSupports = supports
-        .filter(l => l.price < currentPrice)
-        .sort((a, b) => b.price - a.price)
-        .slice(0,3);
-
-    const sortedResistances = resistances
-        .filter(l => l.price > currentPrice)
-        .sort((a, b) => a.price - b.price)
-        .slice(0,3);
-
-    // SANITY CHECK: Ignore structural levels if they are > 10% away
-    const MAX_STOP_DIST_PCT = 0.10;
-
-    let nearestSup = sortedSupports[0]?.price;
-    if (nearestSup && (currentPrice - nearestSup) / currentPrice > MAX_STOP_DIST_PCT) {
-        nearestSup = null; 
+const findLiquidityLevel = (vp, price, type) => {
+    if (!Array.isArray(vp) || vp.length === 0) return null;
+    const sortedVp = [...vp].sort((a,b) => b.volume - a.volume);
+    const threshold = sortedVp[Math.floor(sortedVp.length * 0.3)]?.volume || 0;
+    if (type === 'below') {
+         const supports = sortedVp.filter(n => n.volume >= threshold && n.priceEnd < price).sort((a,b) => b.priceEnd - a.priceEnd);
+         return supports.length ? supports[0].mid : null;
+    } else {
+         const res = sortedVp.filter(n => n.volume >= threshold && n.priceStart > price).sort((a,b) => a.priceStart - b.priceStart);
+         return res.length ? res[0].mid : null;
     }
+};
 
-    let nearestRes = sortedResistances[0]?.price;
-    if (nearestRes && (nearestRes - currentPrice) / currentPrice > MAX_STOP_DIST_PCT) {
-        nearestRes = null; 
-    }
-
-    // --- SMART VOLATILITY DAMPING ---
-    // If ATR is > 5% of price, cap it.
+// --- 5. MAIN ANALYZER ---
+const calculateTradeSetups = (data, currentPrice, supports, resistances, atr, score, macdData, regime, vp, derivatives, timeframe, fundingRealTime, trendLines, trendFilter) => {
     const effectiveAtr = Math.min(atr, currentPrice * 0.05);
+    const liqSupport = findLiquidityLevel(vp, currentPrice, 'below');
+    const liqRes = findLiquidityLevel(vp, currentPrice, 'above');
 
-    // --- DYNAMIC R:R LOGIC ---
-    // Check if a structural level exists between price and ATR target. 
-    // If so, use structure. If not, use ATR.
-
-    // 1. LONG SCENARIOS
-    let longSetupStruct = null;
-    let longSetupFallback = null;
-
-    // Structural Long
-    if (nearestSup) {
-        const stop = nearestSup - (1.5 * effectiveAtr);
-        let target;
-        let note;
-        if (regime === 'TRENDING' && score > 0) {
-             target = currentPrice + (currentPrice - stop) * 2.0; 
-             note = "Target: Trend Extension";
-        } else if (nearestRes) {
-            target = nearestRes * 0.995; 
-            note = "Target: Resistance (Range)";
-        } else {
-            target = currentPrice + (currentPrice - stop) * 1.5; 
-            note = "Target: Extension";
-        }
-        const risk = currentPrice - stop;
-        const reward = target - currentPrice;
-        const rr = risk > 0 ? reward / risk : 0;
-        longSetupStruct = { entry: currentPrice, stop, target, rr, note };
+    // Smart Stop Placement
+    let formationSup = null;
+    if (trendLines && trendLines.supLine) {
+        const idx = data.length - 1;
+        formationSup = trendLines.supLine.p1.low + trendLines.supLine.slope * (idx - trendLines.supLine.p1.localIndex);
     }
 
-    // Fallback Long (Volatility Based + Dynamic Structure Check)
-    {
-        const stop = currentPrice - (1.2 * effectiveAtr); 
-        let target = currentPrice + (2.2 * effectiveAtr); // Base 1.8:1 RR
-        let note = "Scalp (Vol Stop)";
-
-        // Check if resistance blocks the ATR target
-        if (nearestRes && nearestRes < target && nearestRes > currentPrice) {
-             target = nearestRes * 0.99; // Front run resistance
-             note = "Target: Resistance (Dynamic)";
-        }
-
-        const risk = currentPrice - stop;
-        const reward = target - currentPrice;
-        const rr = risk > 0 ? reward / risk : 0;
-        longSetupFallback = { entry: currentPrice, stop, target, rr, note };
+    // LONG
+    let lStop = liqSupport && (currentPrice - liqSupport) < 3.0 * effectiveAtr ? liqSupport * 0.985 : currentPrice - 2.0 * effectiveAtr;
+    if (formationSup && formationSup < currentPrice && (currentPrice - formationSup) < 3.0 * effectiveAtr) {
+        lStop = formationSup * 0.99; 
     }
+    if (currentPrice - lStop < 1.5 * effectiveAtr) lStop = currentPrice - 1.5 * effectiveAtr;
+    let lTarget = liqRes && (liqRes - currentPrice) > 2.0 * effectiveAtr ? liqRes * 0.99 : currentPrice + 3.0 * effectiveAtr;
+    const bestLong = { entry: currentPrice, stop: smartRound(lStop), target: smartRound(lTarget), rr: (lTarget - currentPrice)/(currentPrice - lStop), note: formationSup ? "Trend Line Support" : "Vol Stop" };
 
-    // Pick Best Long
-    let bestLong = longSetupFallback;
-    if (longSetupStruct && longSetupStruct.rr > 1.5) {
-        bestLong = longSetupStruct; 
-    } else if (longSetupStruct && longSetupStruct.rr > longSetupFallback.rr) {
-        bestLong = longSetupStruct; 
-    }
+    // SHORT
+    let sStop = liqRes && (liqRes - currentPrice) < 3.0 * effectiveAtr ? liqRes * 1.015 : currentPrice + 2.0 * effectiveAtr;
+    if (sStop - currentPrice < 1.5 * effectiveAtr) sStop = currentPrice + 1.5 * effectiveAtr;
+    let sTarget = liqSupport && (currentPrice - liqSupport) > 2.0 * effectiveAtr ? liqSupport * 1.01 : currentPrice - 3.0 * effectiveAtr;
+    
+    const riskShort = sStop - currentPrice;
+    const rewardShort = currentPrice - sTarget;
+    const rrShort = riskShort > 0 ? rewardShort / riskShort : 0;
 
-    // 2. SHORT SCENARIOS
-    let shortSetupStruct = null;
-    let shortSetupFallback = null;
-
-    // Structural Short
-    if (nearestRes) {
-        const stop = nearestRes + (1.5 * effectiveAtr);
-        let target;
-        let note;
-        if (regime === 'TRENDING' && score < 0) {
-            target = currentPrice - (stop - currentPrice) * 2.0;
-            note = "Target: Trend Extension";
-        } else if (nearestSup) {
-            target = nearestSup * 1.005;
-            note = "Target: Support (Range)";
-        } else {
-            target = currentPrice - (3 * effectiveAtr);
-            note = "Target: Volatility Extension";
-        }
-        const risk = stop - currentPrice;
-        const reward = currentPrice - target;
-        const rr = risk > 0 ? reward / risk : 0;
-        shortSetupStruct = { entry: currentPrice, stop, target, rr, note };
-    }
-
-    // Fallback Short (Volatility Based + Dynamic Structure Check)
-    {
-        const stop = currentPrice + (1.2 * effectiveAtr);
-        let target = currentPrice - (2.2 * effectiveAtr); // Base 1.8:1 RR
-        let note = "Scalp (Vol Stop)";
-
-        // Check if support blocks the ATR target
-        if (nearestSup && nearestSup > target && nearestSup < currentPrice) {
-             target = nearestSup * 1.01; // Front run support
-             note = "Target: Support (Dynamic)";
-        }
-
-        const risk = stop - currentPrice;
-        const reward = currentPrice - target;
-        const rr = risk > 0 ? reward / risk : 0;
-        shortSetupFallback = { entry: currentPrice, stop, target, rr, note };
-    }
-
-    // Pick Best Short
-    let bestShort = shortSetupFallback;
-    if (shortSetupStruct && shortSetupStruct.rr > 1.5) {
-        bestShort = shortSetupStruct; 
-    } else if (shortSetupStruct && shortSetupStruct.rr > shortSetupFallback.rr) {
-        bestShort = shortSetupStruct; 
-    }
+    const bestShort = { entry: currentPrice, stop: smartRound(sStop), target: smartRound(sTarget), rr: rrShort, note: liqRes ? "Structure Res" : "Vol Stop" };
 
     let recommendation = "WAIT";
-    if (score <= -20) recommendation = "SHORT";
-    else if (score >= 20) recommendation = "LONG";
     
-    if (macdData) {
-        const { hist, prevHist } = macdData;
-        if (recommendation === "LONG") {
-            if (hist < 0 && hist < prevHist) recommendation = "WAIT (Momentum Down)";
-        } else if (recommendation === "SHORT") {
-            if (hist > 0 && hist > prevHist) recommendation = "WAIT (Momentum Up)";
-        }
-    }
-
-    if (recommendation === "LONG" && bestLong.rr < 1.2) recommendation = "WAIT (Bad R:R)";
-    else if (recommendation === "SHORT" && bestShort.rr < 1.2) recommendation = "WAIT (Bad R:R)";
-
-    if (recommendation.includes("WAIT") && !recommendation.includes("Momentum")) {
-        if (bestLong.rr > 3 && score > -10) recommendation = "LONG (Speculative)";
-        else if (bestShort.rr > 3 && score < 10) recommendation = "SHORT (Speculative)";
-    }
-
-    return {
-        long: bestLong,
-        short: bestShort,
-        recommendation,
-        nearestSup,
-        nearestRes
-    };
-};
-
-const generateReport = (timeframe, trend, rsi, volBal, support, resistance, score, currentPrice, regime) => {
-  const term = timeframe === 'short' ? 'short' : timeframe === 'medium' ? 'medium' : 'long';
-  let trendText = "";
-  if (trend.dir === 'rising') {
-    trendText = trend.status === 'break_down' 
-      ? `Bitcoin has **broken down** from the rising trend.` 
-      : `Bitcoin lies in a **rising trend channel**.`;
-  } else if (trend.dir === 'falling') {
-    trendText = trend.status === 'break_up' 
-      ? `Bitcoin has **broken up** from the falling trend.` 
-      : `Bitcoin lies in a **falling trend channel**.`;
-  } else {
-    trendText = `Bitcoin moves **sideways**.`;
-  }
-
-  const regimeText = regime === 'TRENDING' 
-    ? "The market is currently in a **strong trend phase**, favoring breakouts."
-    : "The market is currently **ranging/choppy**, favoring support/resistance bounces.";
-
-  let biasWord = 'neutral';
-  if (score > 10) biasWord = 'positive';
-  if (score < -10) biasWord = 'negative';
-
-  return {
-    paragraph: `${trendText} ${regimeText} The currency is overall assessed as technically ${biasWord} for the ${term} term.`,
-    recommendation: score > 0 ? "Positive" : "Negative",
-    score: score, 
-    horizon: term === 'short' ? '1-6 weeks' : term === 'medium' ? '1-6 months' : '1-6 quarters'
-  };
-};
-
-const runBacktest = (data, signals, atrArray, resLevels, supLevels, macdArray, adxSeries, timeframeDays) => {
-    let wins = 0, losses = 0;
-    let grossProfit = 0, grossLoss = 0; // Track PnL %
-    const history = [];
-
-    // DYNAMIC TIMEOUT: 
-    let lookAhead = 30;
-    if (timeframeDays <= 90) lookAhead = 10;
-    else if (timeframeDays >= 1000) lookAhead = 60;
-
-    signals.forEach(sig => {
-        const knownRes = resLevels.filter(l => l.minIndex < sig.localIndex);
-        const knownSup = supLevels.filter(l => l.minIndex < sig.localIndex);
-        // Ensure ATR is never 0 to avoid divide by zero errors
-        const atr = Math.max(atrArray[sig.localIndex] || (sig.price * 0.05), sig.price * 0.01);
-        
-        const hist = macdArray[sig.localIndex]?.histogram || 0;
-        const prevHist = macdArray[sig.localIndex - 1]?.histogram || 0;
-        
-        const histAdx = adxSeries[sig.localIndex] || 0;
-        const histRegime = histAdx > 25 ? 'TRENDING' : 'RANGING';
-
-        const impliedScore = sig.type === 'buy' ? 100 : -100;
-
-        const setup = calculateTradeSetups(sig.price, knownSup, knownRes, atr, impliedScore, { hist, prevHist }, histRegime);
-        
-        let entry, stop, target;
-        let valid = false;
-        
-        if (sig.type === 'buy') {
-            if (setup.long.entry > 0 && setup.long.target > setup.long.entry && setup.long.stop < setup.long.entry) {
-                 valid = true;
-                 entry = setup.long.entry;
-                 stop = setup.long.stop;
-                 target = setup.long.target;
-            }
-        } else {
-            if (setup.short.entry > 0 && setup.short.target < setup.short.entry && setup.short.stop > setup.short.entry) {
-                 valid = true;
-                 entry = setup.short.entry;
-                 stop = setup.short.stop;
-                 target = setup.short.target;
-            }
-        }
-
-        if (!valid) return;
-
-        let result = 'timeout'; // Default to timeout/market close
-        let exitPrice = entry; // Default exit at entry if something breaks, but overwritten below
-        
-        const endIndex = Math.min(data.length, sig.localIndex + lookAhead + 1);
-        
-        for (let i = sig.localIndex + 1; i < endIndex; i++) {
-            const day = data[i];
-            
-            if (sig.type === 'buy') {
-                if (day.low <= stop) { result = 'loss'; exitPrice = stop; break; }
-                if (day.high >= target) { result = 'win'; exitPrice = target; break; }
-            } else {
-                if (day.high >= stop) { result = 'loss'; exitPrice = stop; break; }
-                if (day.low <= target) { result = 'win'; exitPrice = target; break; }
-            }
-
-            // If we reach the end of the loop without hitting stop/target, close at current price
-            if (i === endIndex - 1) {
-                exitPrice = day.close; 
-                // Result remains 'timeout' but we calculate PnL below
-            }
-        }
-
-        let pctChange = 0;
-        if (sig.type === 'buy') {
-            pctChange = (exitPrice - entry) / entry;
-        } else {
-            pctChange = (entry - exitPrice) / entry;
-        }
-
-        // UPDATE STATS BASED ON REALIZED PNL
-        if (result === 'win') {
-            wins++;
-            grossProfit += pctChange;
-        } else if (result === 'loss') {
-            losses++;
-            grossLoss += Math.abs(pctChange);
-        } else if (result === 'timeout') {
-            // Mark-to-market: If profit > 0, count as win; else loss
-            if (pctChange > 0) {
-                wins++;
-                grossProfit += pctChange;
-            } else {
-                losses++;
-                grossLoss += Math.abs(pctChange);
-            }
-        }
-
-        history.push({ date: sig.date, type: sig.type, result, rr: sig.type === 'buy' ? setup.long.rr : setup.short.rr });
-    });
-
-    const total = signals.length; 
-    const winRate = total > 0 ? wins / total : 0;
-    const avgWin = wins > 0 ? grossProfit / wins : 0;
-    const avgLoss = losses > 0 ? grossLoss / losses : 0;
-    const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 100 : 0);
+    // BASE LOGIC: Trend Filter
+    const isBullish = trendFilter !== null ? currentPrice > trendFilter : score > 0;
     
-    const payoffRatio = avgLoss > 0 ? avgWin / avgLoss : 1.5;
-    let kelly = 0;
-    if (payoffRatio > 0) {
-        kelly = winRate - ((1 - winRate) / payoffRatio);
-    }
-    const conservativeKelly = Math.max(0, kelly * 0.5); 
-    const cappedKelly = Math.min(conservativeKelly * 100, 5);
-
-    let reliability = 'LOW';
-    if (total >= 100 && winRate * 100 > 55 && profitFactor > 1.3) reliability = 'HIGH';
-    else if (total >= 30 && profitFactor > 1.1) reliability = 'MEDIUM';
-
-    return {
-        wins, losses, total,
-        winRate: winRate * 100,
-        profitFactor,
-        kelly: cappedKelly,
-        reliability
-    };
-};
-
-// --- 5. MAIN ANALYZER FUNCTION ---
-const analyzeData = (data, config) => {
-    const slice = data.slice(-config.days);
-    
-    if (!slice.length) {
-        return {
-            data: [], vp: [],
-            patterns: { majorHighs: [], majorLows: [], resLine: null, supLine: null, signals: [], resLevels: [], supLevels: [] },
-            signalsWithDate: [], smartSupports: [], smartResistances: [],
-            current: 0, score: 0,
-            trend: { dir: 'sideways', status: 'inside', rSquared: 0 },
-            rsi: 50, volBal: 0,
-            tradeSetups: { long: {}, short: {}, recommendation: 'WAIT' },
-            backtestStats: { wins: 0, losses: 0, total: 0, winRate: 0, profitFactor: 0, kelly: 0, reliability: 'LOW' },
-            atr: 0,
-            fib: { swing: { dir: 'none' }, levels: [], goldenPocket: null, confluence: { support: null, resistance: null } },
-            regime: 'RANGING',
-            adx: 0,
-            atrPct: 0,
-            environment: 'NORMAL'
-        };
-    }
-
-    const indices = slice.map((_,i) => i);
-    const logP = slice.map(d => Math.log(d.close));
-    const trend = calculateRobustTrend(indices, logP);
-    
-    const patterns = findPatterns(slice, config.pivotWin);
-    const vp = calculateVolumeProfile(slice, 30); 
-    const rsi = calculateRSI(slice.map(d => d.close), config.rsi);
-    
-    const atrArray = calculateATRSeries(slice, 14);
-    const atr = atrArray[atrArray.length - 1];
-    
-    const macd = calculateMACD(slice.map(d => d.close));
-    const ema20 = calculateEMA(slice.map(d => d.close), 20);
-    
-    const { adx: adxValue, diPlus, diMinus, adxSeries } = calculateADX(slice, 14);
-    const regime = adxValue > 25 ? 'TRENDING' : 'RANGING';
-
-    const trendLower = (i) => Math.exp(trend.slope * i + trend.intercept - 2.0 * trend.sigma);
-    const trendUpper = (i) => Math.exp(trend.slope * i + trend.intercept + 2.0 * trend.sigma);
-
-    // --- FIX 2: FALLBACK SIGNAL GENERATOR ---
-    if (patterns.signals.length < 5) {
-      console.log(`[${config.days}d] Few chart patterns found (${patterns.signals.length}). Engaging Smart Fallback Engine.`);
-      for (let i = 50; i < slice.length - 1; i++) {
-        const curr = macd[i];
-        const prev = macd[i-1];
-        const rsiVal = calculateRSI(slice.slice(0, i+1).map(d=>d.close));
-        const emaVal = ema20[i];
-        const adxVal = adxSeries[i];
-
-        if (!curr || !prev || !emaVal) continue;
-
-        // Fallback Buy: 
-        // 1. MACD Cross Up
-        // 2. Price > EMA 20 (Trend is Up)
-        // 3. RSI < 70 (Not Overbought)
-        // 4. ADX > 20 (Trend Strength)
-        if (curr.histogram > 0 && prev.histogram <= 0 && slice[i].close > emaVal && rsiVal < 70 && adxVal > 20) {
-           if (!patterns.signals.some(s => Math.abs(s.localIndex - i) < 5)) {
-                patterns.signals.push({ type: 'buy', price: slice[i].close, localIndex: i, label: 'FB', volRatio: 1 });
-           }
-        } 
-        // Fallback Sell:
-        // 1. MACD Cross Down
-        // 2. Price < EMA 20 (Trend is Down)
-        // 3. RSI > 30 (Not Oversold)
-        // 4. ADX > 20 (Trend Strength)
-        else if (curr.histogram < 0 && prev.histogram >= 0 && slice[i].close < emaVal && rsiVal > 30 && adxVal > 20) {
-           if (!patterns.signals.some(s => Math.abs(s.localIndex - i) < 5)) {
-                patterns.signals.push({ type: 'sell', price: slice[i].close, localIndex: i, label: 'FB', volRatio: 1 });
-           }
-        }
-      }
-      patterns.signals.sort((a, b) => a.localIndex - b.localIndex);
+    if (isBullish) {
+        if (score > 10) recommendation = "LONG";
+        else recommendation = "WAIT (Weak Bull)";
     } else {
-      console.log(`[${config.days}d] Pattern Engine found ${patterns.signals.length} signals.`);
+        if (score < -10) recommendation = "SHORT";
+        else recommendation = "WAIT (Weak Bear)";
     }
 
-    let volBal = 0;
-    const recent = slice.slice(-20);
-    const upV = recent.reduce((a,b,i)=> i>0 && b.close>recent[i-1].close ? a+b.volume : a, 0);
-    const downV = recent.reduce((a,b,i)=> i>0 && b.close<recent[i-1].close ? a+b.volume : a, 0);
-    if (upV > downV * 1.1) volBal = 1;
-    if (downV > upV * 1.1) volBal = -1;
+    // FILTER: Formation Breakdown
+    if (formationSup && currentPrice < formationSup) {
+        if (recommendation === "LONG") recommendation = "WAIT (Trend Broken)";
+        else if (score < 0) recommendation = "SHORT (Breakdown)";
+    }
+
+    // FILTER: Derivatives
+    if (derivatives && derivatives.binanceTop && derivatives.binanceGlobal) {
+        const smartMoneyDelta = (derivatives.binanceTop.positions.longPct || 0) - (derivatives.binanceGlobal.longPct || 0);
+        if (smartMoneyDelta < -0.05 && recommendation.includes("LONG")) recommendation = "WAIT (Whales Shorting)";
+        if (smartMoneyDelta > 0.05 && recommendation.includes("SHORT")) recommendation = "WAIT (Whales Longing)";
+    }
+    
+    // FILTER: Funding
+    if (fundingRealTime && fundingRealTime.rate) {
+        if (fundingRealTime.rate > 0.0005 && recommendation.includes("LONG")) recommendation = "WAIT (High Funding)";
+    }
+
+    // FILTER: Risk Reward
+    if (recommendation === "LONG" && bestLong.rr < 1.5) recommendation = "WAIT (Bad R:R)";
+    else if (recommendation === "SHORT" && bestShort.rr < 1.5) recommendation = "WAIT (Bad R:R)";
+
+    return { long: bestLong, short: bestShort, recommendation, nearestSup: liqSupport, nearestRes: liqRes };
+};
+
+const runBacktest = (data, signals, atrArray, days) => {
+    let wins = 0, losses = 0;
+    let grossWinR = 0; 
+    let grossLossR = 0;
+
+    const equityCurve = [{ trade: 0, equity: 100 }]; 
+    const uniqueSignals = signals.filter((v,i,a)=>a.findIndex(t=>(t.localIndex === v.localIndex && t.type === v.type))===i).sort((a,b)=>a.localIndex - b.localIndex);
+
+    uniqueSignals.forEach((sig, idx) => {
+        const atr = Math.max(atrArray[sig.localIndex] || (sig.price * 0.05), sig.price * 0.01);
+        const effectiveAtr = Math.min(atr, sig.price * 0.05);
+
+        let stop = sig.type === 'buy' ? sig.price - 1.5 * effectiveAtr : sig.price + 1.5 * effectiveAtr;
+        let target = sig.type === 'buy' ? sig.price + 3.0 * effectiveAtr : sig.price - 3.0 * effectiveAtr;
+        
+        let result = 'timeout';
+        const lookAhead = days <= 90 ? 15 : days >= 1000 ? 90 : 45;
+        const endIdx = Math.min(data.length, sig.localIndex + lookAhead); 
+        
+        for (let i = sig.localIndex + 1; i < endIdx; i++) {
+            const day = data[i];
+            if (sig.type === 'buy') {
+                if (day.low <= stop) { result = 'loss'; break; }
+                if (day.high >= target) { result = 'win'; break; }
+            } else {
+                if (day.high >= stop) { result = 'loss'; break; }
+                if (day.low <= target) { result = 'win'; break; }
+            }
+        }
+        
+        const prevEquity = equityCurve[equityCurve.length-1].equity;
+        if (result === 'win') { 
+            wins++; 
+            grossWinR += 2.0;
+            equityCurve.push({ trade: idx+1, equity: prevEquity * 1.04 }); 
+        } else if (result === 'loss') { 
+            losses++; 
+            grossLossR += 1.0;
+            equityCurve.push({ trade: idx+1, equity: prevEquity * 0.98 }); 
+        } else {
+            equityCurve.push({ trade: idx+1, equity: prevEquity });
+        }
+    });
+    
+    const total = uniqueSignals.length;
+    const winRate = total > 0 ? wins / total : 0;
+    const profitFactor = grossLossR > 0 ? grossWinR / grossLossR : (grossWinR > 0 ? 100 : 0); 
+    
+    const kelly = winRate - ((1 - winRate) / 2.0);
+    
+    let reliability = 'LOW';
+    if (total >= 30 && profitFactor > 1.3 && winRate > 0.45) reliability = 'HIGH';
+    else if (total >= 15 && profitFactor > 1.1) reliability = 'MED';
+
+    return { wins, losses, total: uniqueSignals.length, winRate: winRate * 100, profitFactor, kelly: Math.max(0, kelly * 100), equityCurve, reliability };
+};
+
+const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) => {
+    const closePrices = data.map(d => d.close);
+    const rsiFull = calculateRSI(closePrices, config.rsi);
+    const macdFull = calculateMACD(closePrices);
+    const atrFull = calculateATRSeries(data, 14);
+    const sma50Full = calculateSMA(closePrices, 50);
+    const sma200Full = calculateSMA(closePrices, 200);
+    const ema9Full = calculateEMA(closePrices, 9);
+    const { adx: adxVal, slope: adxSlope, adxSeries: adxFull } = calculateADX(data, 14);
+
+    const sliceStartIndex = Math.max(0, data.length - config.days);
+    const slice = data.slice(sliceStartIndex);
+    const rsi = rsiFull[rsiFull.length - 1]; 
+    
+    const macdSlice = macdFull.slice(sliceStartIndex);
+    const atrSlice = atrFull.slice(sliceStartIndex);
+    
+    let maLineSlice = [];
+    let maFilterFull = []; 
+    
+    if (timeframeName === 'short') {
+        maLineSlice = ema9Full.slice(sliceStartIndex);
+        maFilterFull = ema9Full; 
+    } else if (timeframeName === 'medium') {
+        maLineSlice = sma50Full.slice(sliceStartIndex);
+        maFilterFull = sma50Full; 
+    } else {
+        maLineSlice = sma200Full.slice(sliceStartIndex);
+        maFilterFull = sma200Full; 
+    }
+
+    if (!slice.length) return null;
+    
+    const indices = slice.map((_,i) => i);
+    const trend = calculateRobustTrend(indices, slice.map(d => Math.log(d.close)));
+    const patterns = findPatterns(slice, config.pivotWin);
+    const vp = calculateVolumeProfile(slice, 30);
+    
+    const backtestSignals = [];
+    const chartSignals = [];
+    const startLook = 50; 
+    
+    const avgVolFull = data.slice(-200).reduce((a,b)=>a+b.volume,0) / 200;
+    const volThreshold = timeframeName === 'short' ? 0.5 : 0.8; 
+
+    for (let i = startLook; i < data.length - 1; i++) {
+      const curr = macdFull[i];
+      const prev = macdFull[i - 1];
+      if (!curr || !prev) continue;
+      
+      const close = data[i].close;
+      const open = data[i].open;
+      const trendFilter = maFilterFull[i];
+      if (trendFilter === null) continue;
+
+      const isBullishTrend = close > trendFilter;
+      const isBearishTrend = close < trendFilter;
+      const rsiVal = rsiFull[i];
+      const prevRsi = rsiFull[i-1];
+      const adx = adxFull[i]; 
+      const isGreenCandle = close > open;
+      const isRedCandle = close < open;
+      
+      // 1. Trend Following (MACD)
+      if (adx > 15) {
+          if (curr.histogram > 0 && prev.histogram <= 0 && isBullishTrend && rsiVal < 70 && isGreenCandle) {
+               backtestSignals.push({ type: 'buy', price: close, localIndex: i, label: 'Trend' });
+          } else if (curr.histogram < 0 && prev.histogram >= 0 && isBearishTrend && rsiVal > 30 && isRedCandle) {
+               backtestSignals.push({ type: 'sell', price: close, localIndex: i, label: 'Trend' });
+          }
+      }
+
+      // 3. RSI Reversal
+      const longTermTrend = sma200Full[i];
+      if (longTermTrend !== null) {
+          const macroBull = close > longTermTrend;
+          if (rsiVal > 30 && prevRsi <= 30 && (timeframeName === 'short' || macroBull)) { 
+               backtestSignals.push({ type: 'buy', price: close, localIndex: i, label: 'Dip' });
+          } else if (rsiVal < 70 && prevRsi >= 70 && (timeframeName === 'short' || !macroBull)) { 
+               backtestSignals.push({ type: 'sell', price: close, localIndex: i, label: 'Top' });
+          }
+      }
+    }
+    
+    backtestSignals.forEach(s => {
+        if (s.localIndex >= sliceStartIndex) {
+            chartSignals.push({ ...s, localIndex: s.localIndex - sliceStartIndex });
+        }
+    });
+    
+    // De-chop: Minimum spacing between displayed signals
+    const sortedChartSignals = chartSignals.sort((a, b) => a.localIndex - b.localIndex);
+    const filteredChartSignals = [];
+    const minGap = timeframeName === 'short' ? 5 : 15;
+    
+    for (const s of sortedChartSignals) {
+        const last = filteredChartSignals[filteredChartSignals.length - 1];
+        if (!last || (s.localIndex - last.localIndex) > minGap) {
+            filteredChartSignals.push(s);
+        }
+    }
+    patterns.signals = filteredChartSignals;
 
     const current = slice[slice.length-1].close;
-    const annualized = (Math.exp(trend.slope * 365) - 1) * 100;
-    
-    let trendDir = 'sideways';
-    if (trend.rSquared > 0.4) {
-        if (annualized > 10) trendDir = 'rising';
-        else if (annualized < -10) trendDir = 'falling';
-    }
-    
-    const width = 2.0 * trend.sigma;
-    const midLog = trend.slope * (slice.length-1) + trend.intercept;
-    const trendUpperVal = Math.exp(midLog + width);
-    const trendLowerVal = Math.exp(midLog - width);
-    
-    let trendStatus = 'inside';
-    if (current > trendUpperVal) trendStatus = 'break_up';
-    if (current < trendLowerVal) trendStatus = 'break_down';
+    const trendDir = trend.slope * 365 > 0.1 ? 'rising' : trend.slope * 365 < -0.1 ? 'falling' : 'sideways';
+    let score = trendDir === 'rising' ? 30 : trendDir === 'falling' ? -30 : 0;
+    const trendStatus = current > Math.exp(trend.slope * (slice.length-1) + trend.intercept + 2.0 * trend.sigma) ? 'break_up' : current < Math.exp(trend.slope * (slice.length-1) + trend.intercept - 2.0 * trend.sigma) ? 'break_down' : 'inside';
+    if (trendStatus === 'break_up') score += 20; else if (trendStatus === 'break_down') score -= 20;
+    if (rsi < 30) score += 10; if (rsi > 70) score -= 10;
 
-    let score = 0;
-    if (trendDir === 'rising') score = (trendStatus === 'break_down') ? -30 : 50;
-    else if (trendDir === 'falling') score = (trendStatus === 'break_up') ? 30 : -50;
-    else {
-        // FIX: If sideways but broken down below band, it's bearish
-        if (current < trendLowerVal) score = -20;
-        if (current > trendUpperVal) score = 20;
+    let derivativesRisk = 'NONE';
+    let smartMoneyDelta = 0;
+    let derivativesSentiment = 'Neutral';
+    if (derivatives && derivatives.binanceTop && derivatives.binanceGlobal) {
+        smartMoneyDelta = (derivatives.binanceTop.positions.longPct || 0) - (derivatives.binanceGlobal.longPct || 0);
+        if (smartMoneyDelta > 0.05) { score += 15; derivativesSentiment = 'Bullish Divergence'; }
+        else if (smartMoneyDelta < -0.05) { score -= 15; derivativesSentiment = 'Bearish Divergence'; }
+        if (derivatives.binanceGlobal.ratio > 2.5) { score -= 20; derivativesRisk = 'LONG_CROWDED'; derivativesSentiment = 'Overcrowded Longs'; }
+        else if (derivatives.binanceGlobal.ratio < 0.7) { score += 20; derivativesRisk = 'SHORT_CROWDED'; derivativesSentiment = 'Overcrowded Shorts'; }
     }
 
-    if (regime === 'TRENDING') {
-      if (trendDir === 'rising' && diPlus > diMinus + 5) score += 5;
-      if (trendDir === 'falling' && diMinus > diPlus + 5) score -= 5;
-    }
-
-    const recentSignal = patterns.signals[patterns.signals.length - 1];
-    if (recentSignal) {
-        if (recentSignal.type === 'sell') score -= 30;
-        if (recentSignal.type === 'buy') score += 30;
-    }
-
-    const sortedSupports = patterns.supLevels.filter(l => l.price < current).sort((a, b) => b.price - a.price).slice(0,3);
-    const nearestSup = sortedSupports[0]?.price;
-    const sortedResistances = patterns.resLevels.filter(l => l.price > current).sort((a, b) => a.price - b.price).slice(0,3);
-    const nearestRes = sortedResistances[0]?.price;
-    
-    if (nearestSup && (current - nearestSup)/current < 0.02) score += 10;
-    if (!nearestSup) score -= 20;
-    if (rsi < 30) score -= 10;
-    if (rsi > 70) score -= 5;
-    if (volBal > 0) score += 10; else if (volBal < 0) score -= 10;
-
-    // --- Fibonacci Confluence ---
     const fibSwing = findFibSwing(slice, patterns);
-    let fibLevels = [];
-    let fibGoldenPocket = null;
-    const fibConfluence = { support: null, resistance: null };
-
-    if (fibSwing.dir !== 'none') {
-      fibLevels = calculateFibLevels(fibSwing);
-      const goldenRatios = [0.5, 0.618];
-      const goldenLevels = fibLevels.filter(f => goldenRatios.includes(f.ratio));
-      if (goldenLevels.length >= 1) {
-        const gpLow = Math.min(...goldenLevels.map(f => f.price));
-        const gpHigh = Math.max(...goldenLevels.map(f => f.price));
-        fibGoldenPocket = { low: gpLow, high: gpHigh };
-
-        const tolerance = 0.015; 
-        if (nearestSup) {
-          const bestDist = Math.min(...goldenLevels.map(f => Math.abs(nearestSup - f.price) / current));
-          if (bestDist < tolerance) {
-            if (trendDir === 'rising') { score += 10; fibConfluence.support = { level: nearestSup, distance: bestDist }; }
-          }
-        }
-        if (nearestRes) {
-          const bestDist = Math.min(...goldenLevels.map(f => Math.abs(nearestRes - f.price) / current));
-          if (bestDist < tolerance) {
-            if (trendDir === 'falling') { score += 10; fibConfluence.resistance = { level: nearestRes, distance: bestDist }; }
-          }
-        }
-      }
+    const fibLevels = calculateFibLevels(fibSwing);
+    let fibPocket = null;
+    if (fibLevels.length) {
+        const golden = fibLevels.filter(f => f.ratio === 0.5 || f.ratio === 0.618);
+        if (golden.length) fibPocket = { low: Math.min(...golden.map(g=>g.price)), high: Math.max(...golden.map(g=>g.price)) };
     }
 
-    const atrPct = atr / current; 
-    let environment = 'NORMAL';
-    if (atrPct > 0.1 && adxValue < 15) environment = 'CHAOTIC';    
-    else if (atrPct < 0.02 && adxValue < 15) environment = 'NOISE'; 
-    else if (adxValue > 30 && atrPct >= 0.03) environment = 'STRONG_TREND';
-
-    const signalsWithDate = patterns.signals.map(s => ({ ...s, date: slice[s.localIndex].date }));
-    // Pass config.days to dynamic backtest timeout
-    const backtestStats = runBacktest(slice, signalsWithDate, atrArray, patterns.resLevels, patterns.supLevels, macd, adxSeries, config.days);
-
-    const currentMacd = macd[macd.length - 1] || { histogram: 0, signal: 0, macd: 0 };
-    const prevMacd = macd[macd.length - 2] || currentMacd;
-    const tradeSetups = calculateTradeSetups(current, patterns.supLevels, patterns.resLevels, atr, score, { hist: currentMacd.histogram, prevHist: prevMacd.histogram }, regime);
+    let regime = 'RANGING';
+    if (adxVal > 25) {
+        regime = (adxVal > 35) ? 'STRONG_TREND' : 'TRENDING';
+    }
 
     const processed = slice.map((d, i) => {
       const ml = trend.slope * i + trend.intercept;
+      // Restored Blue Lines
       let resY = null, supY = null;
-      if (patterns.resLine && i >= patterns.resLine.p1.localIndex) 
-         resY = patterns.resLine.p1.high + patterns.resLine.slope * (i - patterns.resLine.p1.localIndex);
-      if (patterns.supLine && i >= patterns.supLine.p1.localIndex) 
-         supY = patterns.supLine.p1.low + patterns.supLine.slope * (i - patterns.supLine.p1.localIndex);
+      if (patterns.resLine && i >= patterns.resLine.p1.localIndex) resY = patterns.resLine.p1.high + patterns.resLine.slope * (i - patterns.resLine.p1.localIndex);
+      if (patterns.supLine && i >= patterns.supLine.p1.localIndex) supY = patterns.supLine.p1.low + patterns.supLine.slope * (i - patterns.supLine.p1.localIndex);
+
       const sig = patterns.signals.find(s => s.localIndex === i);
-      return {
-        ...d,
-        trendUpper: Math.exp(ml + width),
-        trendLower: Math.exp(ml - width),
-        trendMid: Math.exp(ml),
-        formationRes: resY,
-        formationSup: supY,
-        signalType: sig ? sig.type : null, 
-        signalLabel: sig ? sig.label : null,
-        macdHist: macd[i]?.histogram ?? 0,
-        macdSignal: macd[i]?.signal ?? 0,
-        macdLine: macd[i]?.macd ?? 0,
-        emaLine: ema20[i] || 0
+      
+      return { 
+          ...d, 
+          trendUpper: Math.exp(ml + 2.0 * trend.sigma), 
+          trendLower: Math.exp(ml - 2.0 * trend.sigma), 
+          formationRes: resY, 
+          formationSup: supY, 
+          signalType: sig?.type, 
+          macdHist: macdSlice[i]?.histogram, 
+          macdSignal: macdSlice[i]?.signal, 
+          macdLine: macdSlice[i]?.macd, 
+          emaLine: maLineSlice[i] 
       };
     });
 
-    return {
-        data: processed,
-        vp, patterns, signalsWithDate,
-        smartSupports: sortedSupports.map(s => {
-          const isFib = fibLevels.some(f => Math.abs(f.price - s.price) / current < 0.01);
-          return { ...s, width: 1 + getVolumeStrength(s.price, vp) * 3 + (isFib ? 1 : 0), fib: isFib };
-        }),
-        smartResistances: sortedResistances.map(r => {
-          const isFib = fibLevels.some(f => Math.abs(f.price - r.price) / current < 0.01);
-          return { ...r, width: 1 + getVolumeStrength(r.price, vp) * 3 + (isFib ? 1 : 0), fib: isFib };
-        }),
-        current, score: Math.max(-100, Math.min(100, score)),
-        trend: { dir: trendDir, status: trendStatus, rSquared: trend.rSquared },
-        rsi, volBal, tradeSetups, backtestStats, atr, regime, adx: adxValue, atrPct, environment,
-        fib: { swing: fibSwing, levels: fibLevels, goldenPocket: fibGoldenPocket, confluence: fibConfluence }
+    const currentTrendFilter = maFilterFull[maFilterFull.length - 1];
+    
+    // GUARD: Ensure MACD slice has enough data
+    let macdHist = 0, prevMacdHist = 0;
+    if (macdSlice.length >= 2) {
+        macdHist = macdSlice[macdSlice.length-1]?.histogram ?? 0;
+        prevMacdHist = macdSlice[macdSlice.length-2]?.histogram ?? 0;
+    }
+
+    const tradeSetups = calculateTradeSetups(slice, current, patterns.supLevels, patterns.resLevels, atrSlice[atrSlice.length-1], score, { hist: macdHist, prevHist: prevMacdHist }, regime, vp, derivatives, timeframeName, fundingRealTime, patterns, currentTrendFilter);
+    const backtestStats = runBacktest(data, backtestSignals, atrFull, config.days);
+    const velocity = adxSlope > 0 ? "Accelerating" : "Decelerating";
+
+    return { 
+        data: processed, vp, patterns, current, score: Math.max(-100, Math.min(100, score)), 
+        trend: { dir: score > 0 ? 'rising' : 'falling' }, rsi, regime, adx: adxVal, atrPct: atrSlice[atrSlice.length-1]/current, 
+        tradeSetups, backtestStats, fib: { swing: fibSwing, levels: fibLevels, goldenPocket: fibPocket },
+        smartSupports: patterns.supLevels.slice(0,3).map(s => ({...s, width: 1 + getVolumeStrength(s.price, vp)*3})),
+        smartResistances: patterns.resLevels.slice(0,3).map(r => ({...r, width: 1 + getVolumeStrength(r.price, vp)*3})),
+        derivatives, derivativesRisk, smartMoneyDelta, derivativesSentiment, velocity
     };
 };
 
-// --- 6. COMPONENT ---
-const BitcoinAnalysis = () => {
-  const [selectedTimeframe, setSelectedTimeframe] = useState('medium');
-  const [rawData, setRawData] = useState(null);
-  const [analyses, setAnalyses] = useState(null);
+// --- COMPONENT ---
+const RatioBar = ({ longPct, shortPct, label, subLabel }) => {
+  const l = (longPct * 100).toFixed(0); const s = (shortPct * 100).toFixed(0);
+  return (
+    <div className="w-full mb-3">
+      <div className="flex justify-between text-[10px] mb-1 text-slate-400 uppercase font-bold tracking-wider"><span>{label}</span><span>{subLabel}</span></div>
+      <div className="relative h-2 w-full overflow-hidden rounded-full bg-slate-800 flex">
+        <div style={{ width: `${l}%` }} className="bg-emerald-500 flex items-center justify-start pl-1 transition-all duration-500"></div>
+        <div style={{ width: `${s}%` }} className="bg-rose-500 flex items-center justify-end pr-1 transition-all duration-500"></div>
+      </div>
+      <div className="flex justify-between text-[10px] mt-0.5 font-mono text-slate-500"><span>{l}% L</span><span>{s}% S</span></div>
+    </div>
+  );
+};
 
-  useEffect(() => { fetchMarketData().then(setRawData); }, []);
+const App = () => {
+  const [timeframe, setTimeframe] = useState('medium');
+  const [marketData, setMarketData] = useState(null);
+  const [marketError, setMarketError] = useState(null);
+  const [derivatives, setDerivatives] = useState(null);
+  const [fundingRealTime, setFundingRealTime] = useState(null);
+  const [analysis, setAnalysis] = useState(null);
 
   useEffect(() => {
-    if(!rawData) return;
-    const configs = {
-      short: { days: 90, pivotWin: 4, rsi: 9 },
-      medium: { days: 365, pivotWin: 8, rsi: 14 },
-      long: { days: 1000, pivotWin: 20, rsi: 14 }
-    };
-    const short = analyzeData(rawData, configs.short);
-    const medium = analyzeData(rawData, configs.medium);
-    const long = analyzeData(rawData, configs.long);
-    setAnalyses({ short, medium, long });
-  }, [rawData]);
+      const load = async () => {
+        const data = await fetchMarketData();
+        if (!data) setMarketError("Market data unavailable. API limits or connectivity issues.");
+        else setMarketData(data);
+      };
+      load();
 
-  if(!analyses) return <div className="p-10 flex justify-center text-gray-400"><RefreshCw className="animate-spin"/></div>;
+      const loadDerivatives = async () => {
+          try {
+              const [bGlobal, bTop, byb, rtFund] = await Promise.all([
+                  fetchBinanceGlobal(), 
+                  fetchBinanceTop(), 
+                  fetchBybit(),
+                  fetchRealTimeFunding()
+              ]);
+              if (bGlobal && bTop) setDerivatives({ binanceGlobal: bGlobal, binanceTop: bTop, bybit: byb });
+              if (rtFund) setFundingRealTime(rtFund);
+          } catch(e) { console.log("Derivatives fetch error", e); }
+      };
+      loadDerivatives();
+      const interval = setInterval(loadDerivatives, 60000);
+      return () => clearInterval(interval);
+  }, []);
 
-  const active = analyses[selectedTimeframe];
-  const { trend, rsi, volBal, tradeSetups, score, backtestStats, current, patterns, fib, regime } = active;
+  useEffect(() => {
+      if(!marketData) return;
+      const config = { short: { days: 90, pivotWin: 3, rsi: 14 }, medium: { days: 365, pivotWin: 10, rsi: 14 }, long: { days: 1000, pivotWin: 20, rsi: 14 } };
+      setAnalysis(analyzeData(marketData, config[timeframe], derivatives, fundingRealTime, timeframe));
+  }, [marketData, timeframe, derivatives, fundingRealTime]);
 
-  let finalRec = tradeSetups.recommendation;
-  let warningMessage = ""; // Use this for "Low Sample Size" warnings instead of overwriting recommendation
-
-  if (selectedTimeframe === 'short') {
-      const med = analyses.medium;
-      const isMedBullish = med.trend.dir === 'rising' && med.trend.status !== 'break_down';
-      const isMedBearish = med.trend.dir === 'falling' && med.trend.status !== 'break_up';
-
-      if (finalRec.includes("LONG") && (isMedBearish || med.score < 0)) {
-           warningMessage = "HTF Conflict: Medium term trend is bearish";
-      }
-      if (finalRec.includes("SHORT") && (isMedBullish || med.score > 0)) {
-           warningMessage = "HTF Conflict: Medium term trend is bullish";
-      }
-  } else if (selectedTimeframe === 'medium') {
-      const long = analyses.long;
-      const isLongBullish = long.trend.dir === 'rising' && long.trend.status !== 'break_down';
-      const isLongBearish = long.trend.dir === 'falling' && long.trend.status !== 'break_up';
-
-      if (finalRec.includes("LONG") && isLongBearish) {
-          warningMessage = "HTF Conflict: Long term trend is bearish";
-      } else if (finalRec.includes("SHORT") && isLongBullish) {
-          warningMessage = "HTF Conflict: Long term trend is bullish";
-      }
-  }
-
-  if (!finalRec.includes('WAIT')) {
-    // Instead of overwriting with "WAIT", we append a warning message
-    if (backtestStats.total < 5) {
-        warningMessage = "Low Sample Size (Trades < 5)";
-    } else if (backtestStats.profitFactor < 1.0) {
-        warningMessage = "Low Reliability (Profit Factor < 1.0)";
-    }
-    
-    if (active.environment === 'CHAOTIC') {
-        warningMessage = "Warning: Chaotic Volatility";
-    } else if (active.environment === 'NOISE') {
-        warningMessage = "Warning: Low Volatility Chop";
-    }
-  }
-
-  const renderPivot = (props) => {
-    const { cx, cy, payload, key } = props;
-    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
-    const isH = active.patterns.majorHighs.find(h => h.date === payload.date);
-    const isL = active.patterns.majorLows.find(l => l.date === payload.date);
-    if (isH) return <circle key={key} cx={cx} cy={cy} r={4} stroke="#ef4444" strokeWidth={2} fill="white" />;
-    if (isL) return <circle key={key} cx={cx} cy={cy} r={4} stroke="#22c55e" strokeWidth={2} fill="white" />;
-    return null;
-  };
-
-  const renderSignalDot = (props) => {
-    const { cx, cy, payload, key } = props;
-    if (!payload.signalType) return null;
-    const color = payload.signalType === 'buy' ? '#22c55e' : '#ef4444';
-    return (
-       <g key={key} transform={`translate(${cx},${cy})`}>
-         {payload.signalType === 'buy' ? <ArrowUp className="w-6 h-6 -ml-3" stroke={color} strokeWidth={3} y={10} /> : <ArrowDown className="w-6 h-6 -ml-3" stroke={color} strokeWidth={3} y={-30} />}
-       </g>
-    );
-  };
-
-  const report = generateReport(selectedTimeframe, trend, rsi, volBal, tradeSetups.nearestSup, tradeSetups.nearestRes, score, current, regime);
-  const hasFibConfluence = fib && (fib.confluence.support || fib.confluence.resistance);
+  if(marketError) return <div className="p-10 flex justify-center text-red-400 flex-col items-center gap-2"><AlertTriangle/><div className="text-sm">{marketError}</div></div>;
+  if(!analysis) return <div className="p-10 flex justify-center text-slate-400"><RefreshCw className="animate-spin"/></div>;
+  
+  const { current, score, tradeSetups, backtestStats, trend, regime, adx, derivativesRisk, smartMoneyDelta, derivativesSentiment, velocity } = analysis;
 
   return (
-    <div className="max-w-6xl mx-auto bg-white p-6 font-sans text-gray-900">
-      <div className="flex justify-between items-center mb-6 border-b pb-4">
+    <div className="max-w-6xl mx-auto bg-slate-50 p-6 font-sans text-slate-900">
+      {/* HEADER */}
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 border-b border-slate-200 pb-4 gap-4">
         <div>
-          <h1 className="text-2xl font-extrabold flex items-center gap-2 text-gray-800">
-            <Activity className="text-orange-500" /> Bitcoin (BTC) Analysis
+          <h1 className="text-3xl font-black flex items-center gap-3 text-slate-800 tracking-tight">
+            <Activity className="text-indigo-600 w-8 h-8" /> Bitcoin AI Analyst
           </h1>
-          <div className="flex flex-wrap gap-2 text-xs text-gray-500 mt-1 items-center">
-            <span className="bg-gray-100 px-2 py-0.5 rounded flex items-center gap-1"><History className="w-3 h-3"/> Backtest: {backtestStats.winRate.toFixed(1)}% WR</span>
-            <span className="bg-gray-100 px-2 py-0.5 rounded flex items-center gap-1"><Layers className="w-3 h-3"/> Multi-TF Gated</span>
-            <span className="bg-gray-100 px-2 py-0.5 rounded flex items-center gap-1"><Zap className="w-3 h-3"/> Momentum Filter</span>
-            <span className={`px-2 py-0.5 rounded flex items-center gap-1 ${regime === 'TRENDING' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
-                <Gauge className="w-3 h-3" /> {regime}
-            </span>
-            <span className="bg-gray-100 px-2 py-0.5 rounded flex items-center gap-1">
-                <Gauge className="w-3 h-3" /> ADX {active.adx.toFixed(1)}
-            </span>
-            <span className={`bg-gray-100 px-2 py-0.5 rounded flex items-center gap-1`}>
-                <Gauge className="w-3 h-3" /> Env {active.environment}
-            </span>
-            <span className="bg-gray-100 px-2 py-0.5 rounded flex items-center gap-1">
-                <Gauge className="w-3 h-3" /> ATR {(active.atrPct * 100).toFixed(1)}%
-            </span>
-            {hasFibConfluence && (
-              <span className="bg-yellow-100 px-2 py-0.5 rounded flex items-center gap-1">
-                <BarChart2 className="w-3 h-3 text-yellow-700" /> Fib Confluence
-              </span>
+          <div className="flex flex-wrap gap-2 text-[10px] uppercase font-bold tracking-wider text-slate-500 mt-2 items-center">
+            {derivativesSentiment && (
+               <span className={`px-2 py-1 rounded flex items-center gap-1 ${derivativesSentiment.includes('Bullish') ? 'bg-emerald-100 text-emerald-700' : derivativesSentiment.includes('Bearish') || derivativesSentiment.includes('Overcrowded') ? 'bg-rose-100 text-rose-700' : 'bg-slate-100 text-slate-600'}`}>
+                   <Users className="w-3 h-3" /> {derivativesSentiment}
+               </span>
             )}
+            <span className={`px-2 py-1 rounded flex items-center gap-1 ${regime === 'STRONG_TREND' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-200 text-slate-600'}`}>
+                <Gauge className="w-3 h-3" /> {regime.replace('_', ' ')}
+            </span>
+            <span className="bg-white border border-slate-200 px-2 py-1 rounded flex items-center gap-1">
+                <Zap className="w-3 h-3" /> ADX {analysis.adx.toFixed(0)}
+            </span>
+            <span className={`border px-2 py-1 rounded flex items-center gap-1 ${velocity === 'Accelerating' ? 'bg-green-50 text-green-700 border-green-100' : 'bg-slate-50 text-slate-500 border-slate-100'}`}>
+                <Timer className="w-3 h-3" /> {velocity}
+            </span>
           </div>
         </div>
-        <div className="flex gap-1 bg-gray-100 p-1 rounded">
+        <div className="flex gap-1 bg-white p-1 rounded-lg border border-slate-200 shadow-sm">
           {['short', 'medium', 'long'].map(t => (
-            <button key={t} onClick={() => setSelectedTimeframe(t)}
-              className={`px-4 py-1 rounded text-sm font-bold uppercase ${selectedTimeframe === t ? 'bg-white shadow text-black' : 'text-gray-400'}`}>
-              {t}
-            </button>
+            <button key={t} onClick={() => setTimeframe(t)} className={`px-6 py-2 rounded-md text-xs font-bold uppercase tracking-wider transition-all ${timeframe === t ? 'bg-slate-800 text-white shadow-md' : 'text-slate-400 hover:bg-slate-50'}`}>{t}</button>
           ))}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* MAIN CHART */}
-        <div className="lg:col-span-2 border border-gray-300 bg-white relative rounded-sm">
-           <div className="h-[450px] w-full pt-4 pr-4 relative">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* LEFT COL: CHART */}
+        <div className="lg:col-span-2 border border-slate-200 bg-white rounded-xl shadow-sm overflow-hidden flex flex-col">
+           <div className="h-[450px] w-full pt-4 pr-4 relative flex-grow">
              <ResponsiveContainer>
-               <ComposedChart data={active.data} margin={{ top: 20, right: 40, left: 0, bottom: 0 }}>
-                 <CartesianGrid strokeDasharray="3 3" vertical={true} stroke="#f3f4f6" />
-                 <XAxis dataKey="date" tick={{fontSize: 10, fill: '#888'}} minTickGap={50} />
-                 <YAxis domain={['auto', 'auto']} orientation="right" tick={{fontSize: 11, fontWeight: 'bold'}} axisLine={false} tickLine={false} tickFormatter={(v)=>Number(v).toLocaleString()} />
-                 <Tooltip contentStyle={{ borderRadius: 4, borderColor: '#eee' }} formatter={(v)=>Number(v).toLocaleString()} />
-                 {fib?.goldenPocket && <ReferenceArea y1={fib.goldenPocket.low} y2={fib.goldenPocket.high} stroke="none" fill="#f97316" fillOpacity={0.08} />}
-                 {fib?.levels && fib.levels.filter((f) => f.ratio === 0.5 || f.ratio === 0.618).map((f, idx) => (
-                    <ReferenceLine key={`fib-${idx}`} y={f.price} stroke="#f97316" strokeDasharray="3 3" strokeWidth={1.5}>
-                      <Label value={`${Math.round(f.ratio * 100)}%`} position="insideRight" fill="#f97316" fontSize={9} />
-                    </ReferenceLine>
-                 ))}
-                 <Line type="monotone" dataKey="trendUpper" stroke="#ccc" strokeWidth={2} dot={false} strokeDasharray="5 5" />
-                 <Line type="monotone" dataKey="trendLower" stroke="#ccc" strokeWidth={2} dot={false} strokeDasharray="5 5" />
-                 <Line type="linear" dataKey="formationRes" stroke="#3b82f6" strokeWidth={2} dot={false} connectNulls />
-                 <Line type="linear" dataKey="formationSup" stroke="#3b82f6" strokeWidth={2} dot={false} connectNulls />
-                 <Line type="monotone" dataKey="close" stroke="#000" strokeWidth={1.5} dot={renderPivot} activeDot={{r: 6}} />
-                 <Line type="monotone" dataKey="close" stroke="none" dot={renderSignalDot} activeDot={false} />
-                 {/* RENDER EMA LINE */}
-                 <Line type="monotone" dataKey="emaLine" stroke="#8b5cf6" strokeWidth={1.5} dot={false} activeDot={false} strokeDasharray="3 3" />
+               <ComposedChart data={analysis.data} margin={{ top: 20, right: 60, left: 0, bottom: 0 }}>
+                 <CartesianGrid strokeDasharray="3 3" vertical={true} stroke="#f1f5f9" />
+                 <XAxis dataKey="date" tick={{fontSize: 10, fill: '#94a3b8'}} minTickGap={50} tickLine={false} axisLine={false} />
+                 <YAxis domain={['auto', 'auto']} orientation="right" tick={{fontSize: 11, fontWeight: '600', fill: '#64748b'}} axisLine={false} tickLine={false} tickFormatter={(v)=>Number(v).toLocaleString()} />
+                 <Tooltip contentStyle={{ borderRadius: 8, border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', fontSize: '12px' }} formatter={(v)=>Number(v).toLocaleString()} labelStyle={{color: '#64748b', marginBottom: '0.5rem'}} />
+                 {analysis.fib?.goldenPocket && <ReferenceArea y1={analysis.fib.goldenPocket.low} y2={analysis.fib.goldenPocket.high} stroke="none" fill="#f59e0b" fillOpacity={0.05} />}
+                 
+                 {/* Linear Trend Channels (Grey) */}
+                 <Line type="monotone" dataKey="trendUpper" stroke="#94a3b8" strokeWidth={2} dot={false} strokeDasharray="4 4" strokeOpacity={0.5} />
+                 <Line type="monotone" dataKey="trendLower" stroke="#94a3b8" strokeWidth={2} dot={false} strokeDasharray="4 4" strokeOpacity={0.5} />
 
-                 {active.smartSupports.map((s, i) => (
-                    <ReferenceLine key={`s-${i}`} y={s.price} stroke={s.fib ? "#f97316" : "#22c55e"} strokeDasharray="5 5" strokeWidth={s.width}>
-                        <Label value={`${s.price}${s.fib ? ' (Fib)' : ''}`} position="insideLeft" fill={s.fib ? "#f97316" : "#22c55e"} fontSize={10} fontWeight="bold" dy={10} />
-                    </ReferenceLine>
-                 ))}
-                 {active.smartResistances.map((r, i) => (
-                    <ReferenceLine key={`r-${i}`} y={r.price} stroke={r.fib ? "#f97316" : "#ef4444"} strokeDasharray="5 5" strokeWidth={r.width}>
-                        <Label value={`${r.price}${r.fib ? ' (Fib)' : ''}`} position="insideLeft" fill={r.fib ? "#f97316" : "#ef4444"} fontSize={10} fontWeight="bold" dy={-10} />
-                    </ReferenceLine>
-                 ))}
+                 {/* Formation Lines (Blue) */}
+                 <Line type="linear" dataKey="formationRes" stroke="#3b82f6" strokeWidth={2} dot={false} connectNulls strokeOpacity={0.8} />
+                 <Line type="linear" dataKey="formationSup" stroke="#3b82f6" strokeWidth={2} dot={false} connectNulls strokeOpacity={0.8} />
+                 
+                 <Line type="monotone" dataKey="close" stroke="#1e293b" strokeWidth={1.5} dot={false} activeDot={{r: 6}} />
+                 
+                 {/* Signals */}
+                 <Line type="monotone" dataKey="close" stroke="none" dot={(props) => {
+                    const {cx, cy, payload, key} = props;
+                    if(!payload || !payload.signalType) return null;
+                    const uniqueKey = `sig-${payload.date}`;
+                    const color = payload.signalType === 'buy' ? '#22c55e' : '#ef4444';
+                    return (
+                       <g key={uniqueKey} transform={`translate(${cx},${cy})`}>
+                         {payload.signalType === 'buy' ? <ArrowUp className="w-5 h-5 -ml-2.5" stroke={color} strokeWidth={3} y={12} /> : <ArrowDown className="w-5 h-5 -ml-2.5" stroke={color} strokeWidth={3} y={-28} />}
+                       </g>
+                    );
+                 }} activeDot={false} />
+
+                 {/* Pivot Dots */}
+                 <Line type="monotone" dataKey="close" stroke="none" dot={(props) => {
+                    const { cx, cy, payload, key } = props;
+                    if (!payload || !payload.date || !Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+                    
+                    const isH = analysis.patterns.majorHighs.some(h => h.date === payload.date);
+                    const isL = analysis.patterns.majorLows.some(l => l.date === payload.date);
+
+                    if (isH) return <circle key={key} cx={cx} cy={cy} r={4} stroke="#ef4444" strokeWidth={2} fill="white" />;
+                    if (isL) return <circle key={key} cx={cx} cy={cy} r={4} stroke="#22c55e" strokeWidth={2} fill="white" />;
+                    return null;
+                 }} activeDot={false} />
+
+                 {/* EMA Line */}
+                 <Line type="monotone" dataKey="emaLine" stroke="#8b5cf6" strokeWidth={1.5} dot={false} strokeDasharray="2 2" />
+
+                 {analysis.smartSupports.map((s, i) => <ReferenceLine key={`s-${i}`} y={s.price} stroke="#22c55e" strokeDasharray="3 3" strokeWidth={1} strokeOpacity={0.5}><Label value={`${s.price}`} position="insideLeft" fill="#22c55e" fontSize={9} fontWeight="bold" dy={10} /></ReferenceLine>)}
+                 {analysis.smartResistances.map((r, i) => <ReferenceLine key={`r-${i}`} y={r.price} stroke="#ef4444" strokeDasharray="3 3" strokeWidth={1} strokeOpacity={0.5}><Label value={`${r.price}`} position="insideLeft" fill="#ef4444" fontSize={9} fontWeight="bold" dy={-10} /></ReferenceLine>)}
                </ComposedChart>
              </ResponsiveContainer>
            </div>
-           <div className="h-16 w-full border-t border-gray-200 bg-gray-50/30 pr-4">
-             <ResponsiveContainer>
-               <BarChart data={active.data} margin={{ top: 0, right: 40, left: 0, bottom: 0 }}>
-                 <Bar dataKey="volume" fill="#bdc3c7" />
-               </BarChart>
-             </ResponsiveContainer>
-           </div>
-           {/* MACD SUBCHART */}
-           <div className="h-20 w-full border-t border-gray-200 bg-white pr-4">
+           <div className="h-20 w-full border-t border-slate-100 bg-slate-50/50 pr-4 pt-2">
                <ResponsiveContainer>
-                   <ComposedChart data={active.data} margin={{ top: 5, right: 40, left: 0, bottom: 0 }}>
-                       <YAxis orientation="right" tick={{fontSize: 8}} axisLine={false} tickLine={false} />
+                   <ComposedChart data={analysis.data} margin={{ top: 0, right: 60, left: 0, bottom: 0 }}>
+                       <YAxis orientation="right" tick={false} axisLine={false} tickLine={false} />
                        <Bar dataKey="macdHist" barSize={2}>
-                         {active.data.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.macdHist > 0 ? '#22c55e' : '#ef4444'} />
-                         ))}
+                         {analysis.data.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.macdHist > 0 ? '#22c55e' : '#ef4444'} fillOpacity={0.6} />)}
                        </Bar>
                        <Line type="monotone" dataKey="macdLine" stroke="#3b82f6" strokeWidth={1} dot={false} />
                        <Line type="monotone" dataKey="macdSignal" stroke="#f59e0b" strokeWidth={1} dot={false} />
@@ -1228,110 +979,122 @@ const BitcoinAnalysis = () => {
            </div>
         </div>
 
-        {/* RIGHT COLUMN */}
+        {/* RIGHT COL: STATS & WIDGETS */}
         <div className="flex flex-col gap-4">
            
-           {/* RECOMMENDATION BADGE */}
-           {finalRec.includes('WAIT') ? (
-                <div className={`p-4 rounded-lg border-2 text-center shadow-md ${score > 20 ? 'bg-green-50 border-green-300' : score < -20 ? 'bg-red-50 border-red-300' : 'bg-gray-50 border-gray-300'}`}>
-                    <div className="text-xs font-bold uppercase tracking-wider opacity-70">Technical Rating</div>
-                    <div className={`text-xl font-black ${score > 20 ? 'text-green-700' : score < -20 ? 'text-red-700' : 'text-gray-600'}`}>
-                        {finalRec}
-                    </div>
-                    {warningMessage && <div className="text-[10px] text-red-600 font-bold mt-1 uppercase">{warningMessage}</div>}
-                    <div className="text-xs font-medium mt-1 opacity-80">Score: {score}</div>
-                </div>
-           ) : (
-               <div className={`p-4 rounded-lg border-2 text-center shadow-md ${finalRec.includes('LONG') ? 'bg-green-50 border-green-500' : 'bg-red-50 border-red-500'}`}>
-                   <div className="text-xs font-bold uppercase tracking-wider opacity-70">Algo Recommendation</div>
-                   <div className={`text-2xl font-black ${finalRec.includes('LONG') ? 'text-green-700' : 'text-red-700'}`}>
-                       {finalRec} (Score: {score})
-                   </div>
-                   {warningMessage && (
-                       <div className="mt-2 flex items-center justify-center gap-1 text-[10px] font-bold uppercase text-orange-600">
-                           <AlertTriangle className="w-3 h-3" /> {warningMessage}
-                       </div>
-                   )}
+           {/* MAIN SIGNAL */}
+           <div className={`p-5 rounded-xl border-l-4 shadow-sm bg-white ${tradeSetups.recommendation.includes('WAIT') ? 'border-slate-300' : tradeSetups.recommendation.includes('LONG') ? 'border-green-500' : 'border-red-500'}`}>
+               <div className="flex justify-between items-start mb-1">
+                   <div className="text-xs font-bold text-slate-400 uppercase tracking-widest">Algo Signal</div>
+                   <div className="text-xs font-bold bg-slate-100 px-2 py-1 rounded text-slate-600">Score: {score}</div>
                </div>
+               <div className={`text-2xl font-black tracking-tight ${tradeSetups.recommendation.includes('LONG') ? 'text-green-600' : tradeSetups.recommendation.includes('SHORT') ? 'text-red-600' : 'text-slate-700'}`}>
+                   {tradeSetups.recommendation}
+               </div>
+               {derivativesRisk !== 'NONE' && (
+                   <div className="mt-2 flex items-center gap-2 text-[10px] font-bold text-indigo-600 bg-indigo-50 p-1.5 rounded border border-indigo-100">
+                       <Zap className="w-3 h-3" /> {derivativesRisk === 'LONG_CROWDED' ? 'Longs Over-Leveraged' : 'Shorts Trapped (Squeeze)'}
+                   </div>
+               )}
+           </div>
+
+           {/* BACKTEST MINI */}
+           <div className="bg-white border border-slate-200 p-4 rounded-xl shadow-sm">
+             <div className="flex justify-between items-center mb-2 border-b border-slate-100 pb-2">
+                <h4 className="font-bold text-xs uppercase tracking-widest text-slate-500">Backtest (Historical)</h4>
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${backtestStats.reliability === 'HIGH' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}`}>{backtestStats.reliability}</span>
+             </div>
+             <div className="flex justify-between text-center mb-3">
+                 <div><div className="text-[9px] text-slate-400 uppercase">Win Rate</div><div className="font-mono font-bold text-sm">{backtestStats.winRate.toFixed(0)}%</div></div>
+                 <div><div className="text-[9px] text-slate-400 uppercase">PF</div><div className="font-mono font-bold text-sm">{backtestStats.profitFactor.toFixed(2)}</div></div>
+                 <div><div className="text-[9px] text-slate-400 uppercase">Kelly</div><div className="font-mono font-bold text-sm text-indigo-600">{backtestStats.kelly.toFixed(0)}%</div></div>
+             </div>
+             <div className="h-10 w-full">
+                 <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={backtestStats.equityCurve}>
+                        <Line type="monotone" dataKey="equity" stroke="#6366f1" strokeWidth={2} dot={false} />
+                    </LineChart>
+                 </ResponsiveContainer>
+             </div>
+             <div className="text-[9px] text-slate-400 mt-1 text-center">Equity Curve ({backtestStats.total} Trades)</div>
+           </div>
+
+           {/* TRADE PLANS */}
+           <div className="grid grid-cols-2 gap-2">
+               <div className={`p-2 rounded border ${tradeSetups.recommendation.includes('LONG') ? 'bg-green-50 border-green-200' : 'bg-slate-50 border-slate-100 opacity-60'}`}>
+                   <div className="text-[9px] font-black text-green-700 uppercase mb-1">Long (RR {tradeSetups.long.rr.toFixed(1)})</div>
+                   <div className="text-[10px] font-mono text-slate-600">
+                       <div className="flex justify-between"><span>E</span><span>${Math.round(tradeSetups.long.entry).toLocaleString()}</span></div>
+                       <div className="flex justify-between text-red-500"><span>S</span><span>${Math.round(tradeSetups.long.stop).toLocaleString()}</span></div>
+                       <div className="flex justify-between text-green-600"><span>T</span><span>${Math.round(tradeSetups.long.target).toLocaleString()}</span></div>
+                   </div>
+               </div>
+               <div className={`p-2 rounded border ${tradeSetups.recommendation.includes('SHORT') ? 'bg-red-50 border-red-200' : 'bg-slate-50 border-slate-100 opacity-60'}`}>
+                   <div className="text-[9px] font-black text-red-700 uppercase mb-1">Short (RR {tradeSetups.short.rr.toFixed(1)})</div>
+                   <div className="text-[10px] font-mono text-slate-600">
+                       <div className="flex justify-between"><span>E</span><span>${Math.round(tradeSetups.short.entry).toLocaleString()}</span></div>
+                       <div className="flex justify-between text-red-500"><span>S</span><span>${Math.round(tradeSetups.short.stop).toLocaleString()}</span></div>
+                       <div className="flex justify-between text-green-600"><span>T</span><span>${Math.round(tradeSetups.short.target).toLocaleString()}</span></div>
+                   </div>
+               </div>
+           </div>
+
+           {/* FUNDING ANALYTICS WIDGET */}
+           <div className="bg-slate-900 text-white p-4 rounded-xl shadow-lg border border-slate-800 mt-auto">
+                <div className="flex justify-between items-center mb-3 border-b border-slate-800 pb-2">
+                    <h4 className="font-bold text-xs uppercase tracking-widest flex items-center gap-2 text-yellow-300"><Percent className="w-3 h-3"/> Funding Analytics</h4>
+                    {fundingRealTime && <span className="text-[10px] text-slate-400 font-mono">{getCountDown(fundingRealTime.nextTime)}</span>}
+                </div>
+                {fundingRealTime ? (
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <div className="text-[10px] text-slate-400 uppercase">Predicted</div>
+                            <div className={`text-lg font-mono font-bold ${fundingRealTime.rate > 0.0001 ? 'text-red-400' : fundingRealTime.rate < 0 ? 'text-green-400' : 'text-white'}`}>
+                                {formatPercent(fundingRealTime.rate)}
+                            </div>
+                        </div>
+                        <div className="text-right">
+                            <div className="text-[10px] text-slate-400 uppercase">Annualized</div>
+                            <div className="text-lg font-mono font-bold text-yellow-400">
+                                {formatPercent(fundingRealTime.annualized)}
+                            </div>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="text-xs text-slate-500 text-center py-2">Loading Funding Data...</div>
+                )}
+           </div>
+
+           {/* DERIVATIVES SENTIMENT WIDGET */}
+           {analysis.derivatives ? (
+             <div className="bg-slate-900 text-white p-4 rounded-xl shadow-lg border border-slate-800">
+                <div className="grid grid-cols-2 gap-4 mb-4 border-b border-slate-800 pb-3">
+                    <div>
+                        <div className="text-[10px] text-slate-400 uppercase font-bold tracking-wider mb-1">Market Mood</div>
+                        <div className={`text-sm font-bold flex items-center gap-1 ${derivativesSentiment.includes('Bullish') ? 'text-emerald-400' : derivativesSentiment.includes('Bearish') || derivativesSentiment.includes('Overcrowded') ? 'text-rose-400' : 'text-slate-200'}`}>
+                            {derivativesSentiment.includes('Bullish') ? <TrendingUp size={14}/> : <TrendingDown size={14}/>}
+                            {derivativesSentiment}
+                        </div>
+                    </div>
+                    <div className="text-right">
+                        <div className="text-[10px] text-slate-400 uppercase font-bold tracking-wider mb-1">Global L/S Ratio</div>
+                        <div className="text-lg font-mono font-bold">{analysis.derivatives.binanceGlobal.ratio.toFixed(2)}x</div>
+                    </div>
+                </div>
+                <div className="space-y-4">
+                    <RatioBar longPct={analysis.derivatives.binanceGlobal.longPct} shortPct={analysis.derivatives.binanceGlobal.shortPct} label="Retail Accounts" subLabel="Global Sentiment" />
+                    <RatioBar longPct={analysis.derivatives.binanceTop.positions.longPct} shortPct={analysis.derivatives.binanceTop.positions.shortPct} label="Whale Positions" subLabel="Smart Money Top 20%" />
+                </div>
+                <div className="mt-3 pt-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center gap-2">
+                    <Target className="w-3 h-3 text-blue-400"/>
+                    <span>Delta: <span className={smartMoneyDelta > 0 ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>{(smartMoneyDelta * 100).toFixed(1)}%</span> ({smartMoneyDelta > 0 ? "Whales Long" : "Whales Short"})</span>
+                </div>
+             </div>
+           ) : (
+             <div className="p-4 bg-slate-100 rounded-xl text-center text-xs text-slate-400 border border-slate-200 border-dashed flex items-center justify-center gap-2">
+                 <WifiOff className="w-4 h-4" /> Loading Derivatives...
+             </div>
            )}
-
-           {/* BACKTEST RESULTS & KELLY */}
-           <div className="bg-slate-800 text-white p-4 rounded-xl shadow-lg">
-             <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-600">
-               <h4 className="font-bold text-xs uppercase tracking-widest flex items-center gap-2"><History className="w-3 h-3"/> Strategy Performance</h4>
-               <span className="text-[10px] bg-slate-700 px-2 py-0.5 rounded text-slate-300">
-                   {backtestStats.total} Trades · {backtestStats.reliability}
-               </span>
-             </div>
-             <div className="grid grid-cols-3 gap-2 text-center">
-                 <div>
-                     <div className="text-[9px] uppercase text-slate-400 font-bold">Win Rate</div>
-                     <div className={`text-lg font-mono font-bold ${backtestStats.winRate > 50 ? 'text-green-400' : 'text-orange-400'}`}>
-                         {backtestStats.winRate.toFixed(0)}%
-                     </div>
-                 </div>
-                 <div>
-                     <div className="text-[9px] uppercase text-slate-400 font-bold">Pr. Factor</div>
-                     <div className={`text-lg font-mono font-bold ${backtestStats.profitFactor > 1.2 ? 'text-blue-400' : 'text-gray-400'}`}>
-                         {backtestStats.profitFactor.toFixed(2)}
-                     </div>
-                 </div>
-                 <div>
-                     <div className="text-[9px] uppercase text-slate-400 font-bold">Kelly Bet</div>
-                     <div className={`text-lg font-mono font-bold ${backtestStats.kelly > 0 ? 'text-purple-400' : 'text-gray-500'}`}>
-                         {backtestStats.kelly > 0 ? `${backtestStats.kelly.toFixed(1)}%` : '0%'}
-                     </div>
-                 </div>
-             </div>
-           </div>
-
-           {/* LONG SETUP */}
-           <div className={`p-4 border rounded-xl relative ${finalRec.includes('LONG') ? 'border-green-500 bg-white shadow-lg ring-2 ring-green-100' : 'border-gray-200 bg-gray-50 opacity-70'}`}>
-             <div className="flex justify-between items-center mb-2">
-                 <h4 className="font-black text-green-700 flex items-center gap-2"><TrendingUp className="w-4 h-4"/> LONG</h4>
-                 <span className={`text-xs font-bold px-2 py-1 rounded ${tradeSetups.long.rr >= 1.5 ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-600'}`}>
-                   RR: {tradeSetups.long.rr.toFixed(2)}
-                 </span>
-             </div>
-             <div className="text-sm space-y-1 text-gray-700 font-mono">
-                 <div className="flex justify-between"><span>Entry</span> <span>${Math.round(tradeSetups.long.entry).toLocaleString()}</span></div>
-                 <div className="flex justify-between text-red-600"><span>Stop</span> <span>${Math.round(tradeSetups.long.stop).toLocaleString()}</span></div>
-                 <div className="flex justify-between text-green-600"><span>Target</span> <span>${Math.round(tradeSetups.long.target).toLocaleString()}</span></div>
-             </div>
-             <div className="text-[10px] text-gray-400 mt-2 border-t pt-1 text-right">{tradeSetups.long.note}</div>
-           </div>
-
-           {/* SHORT SETUP */}
-           <div className={`p-4 border rounded-xl relative ${finalRec.includes('SHORT') ? 'border-red-500 bg-white shadow-lg ring-2 ring-red-100' : 'border-gray-200 bg-gray-50 opacity-70'}`}>
-             <div className="flex justify-between items-center mb-2">
-                 <h4 className="font-black text-red-700 flex items-center gap-2"><TrendingDown className="w-4 h-4"/> SHORT</h4>
-                 <span className={`text-xs font-bold px-2 py-1 rounded ${tradeSetups.short.rr >= 1.5 ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-600'}`}>
-                   RR: {tradeSetups.short.rr.toFixed(2)}
-                 </span>
-             </div>
-             <div className="text-sm space-y-1 text-gray-700 font-mono">
-                 <div className="flex justify-between"><span>Entry</span> <span>${Math.round(tradeSetups.short.entry).toLocaleString()}</span></div>
-                 <div className="flex justify-between text-red-600"><span>Stop</span> <span>${Math.round(tradeSetups.short.stop).toLocaleString()}</span></div>
-                 <div className="flex justify-between text-green-600"><span>Target</span> <span>${Math.round(tradeSetups.short.target).toLocaleString()}</span></div>
-             </div>
-             <div className="text-[10px] text-gray-400 mt-2 border-t pt-1 text-right">{tradeSetups.short.note}</div>
-           </div>
-
-           {/* ANALYSIS TEXT */}
-           <div className="flex-grow p-4 border border-gray-200 rounded-xl bg-white shadow-sm overflow-y-auto max-h-60">
-             <h3 className="font-bold text-gray-900 mb-2 flex items-center gap-2 uppercase text-xs border-b pb-1">
-                 <AlignLeft className="w-3 h-3" /> Analysis
-             </h3>
-             <div className="prose prose-xs text-gray-600 leading-relaxed text-justify">
-                 <p dangerouslySetInnerHTML={{ __html: report.paragraph.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') }} />
-             </div>
-             <div className="mt-4 pt-4 border-t border-gray-100">
-                 <div className="flex flex-wrap items-center gap-2 text-xs text-blue-600 bg-blue-50 p-2 rounded">
-                    <BrainCircuit className="w-4 h-4" />
-                    <span><strong>Adaptive Logic:</strong> Targets & Stops automatically adjust to market volatility and trend regime.</span>
-                 </div>
-             </div>
-           </div>
 
         </div>
       </div>
@@ -1339,6 +1102,6 @@ const BitcoinAnalysis = () => {
   );
 };
 
-// --- 7. MOUNT APP ---
-const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(<BitcoinAnalysis />);
+const rootElement = document.getElementById('root');
+const root = ReactDOM.createRoot(rootElement);
+root.render(<App />);
