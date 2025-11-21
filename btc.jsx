@@ -1,9 +1,42 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  Line, LineChart, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
+// Use the globals provided by the UMD scripts you loaded in index.html
+const { useState, useEffect } = React;
+const { 
+  Line, LineChart, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   ReferenceLine, ReferenceArea, ComposedChart, Bar, BarChart, Label, Cell
-} from 'recharts';
-import { Activity, ArrowUp, ArrowDown, RefreshCw, AlignLeft, BarChart2, TrendingUp, TrendingDown, History, Layers, Zap, Gauge, BrainCircuit, AlertTriangle, Users, DollarSign, Target, WifiOff, Timer, Clock, Percent } from 'lucide-react';
+} = Recharts;
+
+// Tiny helper so className still works
+const Icon = ({ children, className }) => (
+  <span
+    className={className}
+    style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+  >
+    {children}
+  </span>
+);
+
+const Activity    = (props) => <Icon {...props}>📈</Icon>;
+const ArrowUp     = (props) => <Icon {...props}>⬆️</Icon>;
+const ArrowDown   = (props) => <Icon {...props}>⬇️</Icon>;
+const RefreshCw   = (props) => <Icon {...props}>🔄</Icon>;
+const AlignLeft   = (props) => <Icon {...props}>≡</Icon>;
+const BarChart2   = (props) => <Icon {...props}>📊</Icon>;
+const TrendingUp  = (props) => <Icon {...props}>📈</Icon>;
+const TrendingDown= (props) => <Icon {...props}>📉</Icon>;
+const History     = (props) => <Icon {...props}>🕒</Icon>;
+const Layers      = (props) => <Icon {...props}>🧱</Icon>;
+const Zap         = (props) => <Icon {...props}>⚡</Icon>;
+const Gauge       = (props) => <Icon {...props}>🧭</Icon>;
+const BrainCircuit= (props) => <Icon {...props}>🧠</Icon>;
+const AlertTriangle=(props) => <Icon {...props}>⚠️</Icon>;
+const Users       = (props) => <Icon {...props}>👥</Icon>;
+const DollarSign  = (props) => <Icon {...props}>💲</Icon>;
+const Target      = (props) => <Icon {...props}>🎯</Icon>;
+const WifiOff     = (props) => <Icon {...props}>📵</Icon>;
+const Timer       = (props) => <Icon {...props}>⏱️</Icon>;
+const Clock       = (props) => <Icon {...props}>🕒</Icon>;
+const Percent     = (props) => <Icon {...props}>%</Icon>;
+
 
 // --- 1. DATA FETCHING & PROXIES ---
 
@@ -1069,4 +1102,6 @@ const App = () => {
   );
 };
 
-export default App;
+const rootEl = document.getElementById('root');
+const root = ReactDOM.createRoot(rootEl);
+root.render(<App />);

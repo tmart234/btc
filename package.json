@@ -1,6 +1,7 @@
 {
-  "name": "bitcoin-ai-analyst",
+  "name": "btc",
   "version": "0.1.0",
+  "private": true,
   "homepage": "https://tmart234.github.io/btc",
   "devDependencies": {
     "gh-pages": "^6.3.0"
