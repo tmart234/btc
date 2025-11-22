@@ -157,6 +157,99 @@ async function fetchFundingHistory() {
   }
 }
 
+// Fetch Historical Crypto Fear & Greed Index (per day, keyed by YYYY-MM-DD)
+async function fetchFearGreedHistory() {
+  const history = {};
+  const url = 'https://api.alternative.me/fng/?limit=0&format=json';
+
+  try {
+    let json = null;
+
+    // 1) Try direct (CORS is usually OK for this API)
+    try {
+      const res = await fetch(url);
+      if (res.ok) {
+        json = await res.json();
+        console.log('[FNG] direct ok, count:', json?.data?.length);
+      } else {
+        console.warn('[FNG] direct status', res.status);
+      }
+    } catch (e) {
+      console.warn('[FNG] direct fetch failed', e);
+    }
+
+    // 2) Fallback to proxy pipeline if direct failed
+    if (!json) {
+      json = await fetchJson(url);
+      console.log('[FNG] proxy response', json && json.data && json.data.length);
+    }
+
+    if (!json || !Array.isArray(json.data)) {
+      console.warn('[FNG] unexpected payload', json);
+      return history;
+    }
+
+    json.data.forEach((row) => {
+      const ts = Number(row.timestamp);
+      const val = Number(row.value);
+      if (!Number.isFinite(ts) || !Number.isFinite(val)) return;
+
+      const dateStr = new Date(ts * 1000).toISOString().split('T')[0];
+      history[dateStr] = {
+        fearGreed: val,
+        fearGreedClass: row.value_classification || '',
+      };
+    });
+
+    return history;
+  } catch (e) {
+    console.error('[FNG] fetch failed', e);
+    return history;
+  }
+}
+
+
+
+// Fetch Historical Open Interest (per day)
+async function fetchOpenInterestHistory() {
+  const history = {};
+  try {
+    // Daily OI history for BTCUSDT perps
+    const url =
+      'https://fapi.binance.com/futures/data/openInterestHist' +
+      '?symbol=BTCUSDT&period=1d&limit=365';
+
+    const raw = await fetchJson(url);
+    const arr = Array.isArray(raw)
+      ? raw
+      : (raw && Array.isArray(raw.data))
+        ? raw.data
+        : [];
+
+    arr.forEach(d => {
+      const t = d.timestamp || d.time;
+      const oiRaw =
+        d.sumOpenInterest ??
+        d.openInterest ??
+        d.sumOpenInterestValue;
+
+      const oi = parseFloat(oiRaw);
+      if (!t || !Number.isFinite(oi)) return;
+
+      const dateStr = new Date(Number(t)).toISOString().split('T')[0];
+      const oiValRaw = d.sumOpenInterestValue;
+      const oiVal = oiValRaw != null ? parseFloat(oiValRaw) : null;
+
+      history[dateStr] = {
+        openInterest: oi,
+        openInterestUsd: Number.isFinite(oiVal) ? oiVal : null,
+      };
+    });
+  } catch (e) {
+    console.error('Open interest history fetch failed', e);
+  }
+  return history;
+}
 
 // Fetch Historical Global vs Top Long/Short Ratios (per day)
 async function fetchLongShortHistory() {
@@ -221,29 +314,56 @@ async function fetchRealTimeFunding() {
 const fetchMarketData = async () => {
   try {
     let priceData = null;
-    const priceUrl = `https://min-api.cryptocompare.com/data/v2/histoday?fsym=BTC&tsym=USD&limit=2000`;
+    const priceUrl =
+      'https://min-api.cryptocompare.com/data/v2/histoday?fsym=BTC&tsym=USD&limit=2000';
 
+    // 1) Try direct call (if CORS allows)
     try {
       const res = await fetch(priceUrl);
+      console.log('[fetchMarketData] direct histoday status', res.status);
       if (res.ok) {
         const json = await res.json();
-        if (json.Response === 'Success') priceData = json.Data.Data;
+        console.log(
+          '[fetchMarketData] direct histoday payload',
+          json.Response,
+          json.Message
+        );
+        if (json.Response === 'Success' && Array.isArray(json.Data?.Data)) {
+          priceData = json.Data.Data;
+        }
       }
-    } catch (e) {}
-
-    if (!priceData) {
-      const json = await fetchJson(priceUrl);
-      if (json && json.Response === 'Success') priceData = json.Data.Data;
+    } catch (e) {
+      console.warn('[fetchMarketData] direct histoday failed', e);
     }
 
-    if (!priceData) return null;
+    // 2) Fall back to proxies if direct failed or API responded with error
+    if (!priceData) {
+      const json = await fetchJson(priceUrl);
+      console.log(
+        '[fetchMarketData] proxy histoday payload',
+        json && json.Response,
+        json && json.Message
+      );
+      if (json && json.Response === 'Success' && Array.isArray(json.Data?.Data)) {
+        priceData = json.Data.Data;
+      }
+    }
 
-    const [fundingHistory, lsHistory] = await Promise.all([
+    if (!priceData) {
+      console.error('[fetchMarketData] No price data from CryptoCompare');
+      return null;
+    }
+
+    // Pull in all the side-histories in parallel (funding, OI, long/short, FNG)
+    const [fundingHistory, lsHistory, oiHistory, fngHistory] = await Promise.all([
       fetchFundingHistory(),
       fetchLongShortHistory(),
+      fetchOpenInterestHistory(),
+      fetchFearGreedHistory(),
     ]);
 
     const cleanData = [];
+
     priceData.forEach((d, i) => {
       if (Number.isFinite(d.close) && Number.isFinite(d.volumeto) && d.close > 0) {
         const dateStr = new Date(d.time * 1000).toISOString().split('T')[0];
@@ -262,6 +382,20 @@ const fetchMarketData = async () => {
         const globalLsRatio = ls.global ?? null;
         const topLsRatio = ls.top ?? null;
 
+        // Daily open interest
+        const oi = oiHistory[dateStr] || {};
+        const openInterest = Number.isFinite(oi.openInterest)
+          ? oi.openInterest
+          : null;
+        const openInterestUsd = Number.isFinite(oi.openInterestUsd)
+          ? oi.openInterestUsd
+          : null;
+
+        // Fear & Greed (aligned by date)
+        const fng = fngHistory[dateStr] || {};
+        const fearGreed = Number.isFinite(fng.fearGreed) ? fng.fearGreed : null;
+        const fearGreedClass = fng.fearGreedClass || null;
+
         cleanData.push({
           date: dateStr,
           index: i,
@@ -273,28 +407,58 @@ const fetchMarketData = async () => {
           fundingRate: dailyFund,
           globalLsRatio,
           topLsRatio,
+          openInterest,
+          openInterestUsd,
+          oiChange: null,
+          oiChangePct: null,
+          fearGreed,
+          fearGreedClass,
         });
       }
     });
 
-    // light forward-fill just at the very end so the latest day doesn’t look “missing”
+    // light forward-fill + ΔOI (unchanged)
     for (let i = 1; i < cleanData.length; i++) {
-      if (cleanData[i].fundingRate == null) {
-        cleanData[i].fundingRate = cleanData[i - 1].fundingRate;
+      const cur = cleanData[i];
+      const prev = cleanData[i - 1];
+
+      if (cur.fundingRate == null) {
+        cur.fundingRate = prev.fundingRate;
       }
-      if (cleanData[i].globalLsRatio == null) {
-        cleanData[i].globalLsRatio = cleanData[i - 1].globalLsRatio;
+      if (cur.globalLsRatio == null) {
+        cur.globalLsRatio = prev.globalLsRatio;
       }
-      if (cleanData[i].topLsRatio == null) {
-        cleanData[i].topLsRatio = cleanData[i - 1].topLsRatio;
+      if (cur.topLsRatio == null) {
+        cur.topLsRatio = prev.topLsRatio;
+      }
+
+      if (
+        Number.isFinite(cur.openInterest) &&
+        Number.isFinite(prev.openInterest) &&
+        prev.openInterest !== 0
+      ) {
+        const diff = cur.openInterest - prev.openInterest;
+        cur.oiChange = diff;
+        cur.oiChangePct = diff / prev.openInterest;
+      } else {
+        cur.oiChange = null;
+        cur.oiChangePct = null;
       }
     }
 
+    if (cleanData.length > 0 && Number.isFinite(cleanData[0].openInterest)) {
+      cleanData[0].oiChange = 0;
+      cleanData[0].oiChangePct = 0;
+    }
+
+    console.log('[fetchMarketData] final bars', cleanData.length);
     return cleanData;
   } catch (err) {
+    console.error('[fetchMarketData] unexpected error', err);
     return null;
   }
 };
+
 
 // Derivatives Snapshot (real-time)
 async function fetchBinanceGlobal() {
@@ -528,7 +692,93 @@ const calculateADX = (data, period = 14) => {
     slope
   };
 };
+// --- FUNDING & OI DISTRIBUTION HELPERS ---
+// Generic distribution stats for "latest vs full history"
+const computeDistributionStats = (values, latest) => {
+  const clean = values.filter(
+    v => v !== null && v !== undefined && Number.isFinite(v)
+  );
+  if (!clean.length || !Number.isFinite(latest)) return null;
 
+  const sorted = [...clean].sort((a, b) => a - b);
+  const n = sorted.length;
+
+  let idx = sorted.findIndex(v => v >= latest);
+  if (idx === -1) idx = n - 1;
+
+  const percentile = (idx / (n - 1 || 1)) * 100;
+  const mean = clean.reduce((a, b) => a + b, 0) / n;
+  const variance = clean.reduce((a, b) => a + (b - mean) * (b - mean), 0) / n;
+  const stdev = Math.sqrt(variance);
+  const zScore = stdev > 0 ? (latest - mean) / stdev : 0;
+
+  return {
+    latest,
+    percentile,
+    mean,
+    stdev,
+    zScore,
+    min: sorted[0],
+    max: sorted[n - 1],
+  };
+};
+
+// Label high/low funding extremes
+const classifyFundingExtreme = (stats) => {
+  if (!stats) return { label: 'Normal', side: null };
+  const { latest, percentile } = stats;
+
+  if (percentile >= 97) return { label: 'Extreme Long Crowding', side: 'long' };
+  if (percentile >= 90) return { label: 'High Long Bias', side: 'long' };
+  if (percentile <= 3) return { label: 'Extreme Short Crowding', side: 'short' };
+  if (percentile <= 10) return { label: 'High Short Bias', side: 'short' };
+  if (latest < 0) return { label: 'Negative Funding', side: 'short' };
+
+  return { label: 'Normal', side: null };
+};
+
+// Classify OI flow vs price move
+const classifyOpenInterestFlow = (priceChange, oiChangePct, changeStats) => {
+  if (!Number.isFinite(priceChange) || !Number.isFinite(oiChangePct)) {
+    return 'Neutral';
+  }
+
+  const pc = priceChange;
+  const oc = oiChangePct;
+  const upPrice = pc > 0;
+  const upOi = oc > 0;
+
+  const magPct = changeStats?.percentile ?? 0;
+  const isExtreme = magPct >= 90;
+  const isStrong = magPct >= 70;
+
+  // Up price + up OI = new positions in trend direction
+  if (upPrice && upOi) {
+    if (isExtreme) return 'New Longs (Trend Growing)';
+    if (isStrong) return 'Long Build-up';
+    return 'Mild Long Add';
+  }
+
+  // Up price + down OI = short covering / profit taking
+  if (upPrice && !upOi) {
+    if (isExtreme) return 'Short Squeeze / Deleveraging Up';
+    return 'Up on Position Reduction';
+  }
+
+  // Down price + up OI = fresh shorts piling in
+  if (!upPrice && upOi) {
+    if (isExtreme) return 'Aggressive Shorting';
+    return 'Shorts Adding';
+  }
+
+  // Down price + down OI = long liquidation / exit
+  if (!upPrice && !upOi) {
+    if (isExtreme) return 'Long Liquidation / Deleveraging';
+    return 'Down on Deleveraging';
+  }
+
+  return 'Neutral';
+};
 
 // --- 3. PATTERNS ---
 const calculateVolumeProfile = (data, buckets = 24) => {
@@ -888,8 +1138,9 @@ const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) 
 
   const sliceStartIndex = Math.max(0, data.length - config.days);
   const slice = data.slice(sliceStartIndex);
-  const rsi = rsiFull[rsiFull.length - 1];
+  if (!slice.length) return null;
 
+  const rsi = rsiFull[rsiFull.length - 1];
   const macdSlice = macdFull.slice(sliceStartIndex);
   const atrSlice = atrFull.slice(sliceStartIndex);
 
@@ -907,19 +1158,15 @@ const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) 
     maFilterFull = sma200Full;
   }
 
-  if (!slice.length) return null;
-
-  const indices = slice.map((_,i) => i);
+  const indices = slice.map((_, i) => i);
   const trend = calculateRobustTrend(indices, slice.map(d => Math.log(d.close)));
   const patterns = findPatterns(slice, config.pivotWin);
   const vp = calculateVolumeProfile(slice, 30);
 
+  // --- Signal generation for backtest ---
   const backtestSignals = [];
   const chartSignals = [];
   const startLook = 50;
-
-  const avgVolFull = data.slice(-200).reduce((a,b)=>a+b.volume,0) / 200;
-  const volThreshold = timeframeName === 'short' ? 0.5 : 0.8;
 
   for (let i = startLook; i < data.length - 1; i++) {
     const curr = macdFull[i];
@@ -934,11 +1181,12 @@ const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) 
     const isBullishTrend = close > trendFilter;
     const isBearishTrend = close < trendFilter;
     const rsiVal = rsiFull[i];
-    const prevRsi = rsiFull[i-1];
+    const prevRsi = rsiFull[i - 1];
     const adx = adxFull[i];
     const isGreenCandle = close > open;
     const isRedCandle = close < open;
 
+    // MACD trend signals
     if (adx > 15) {
       if (curr.histogram > 0 && prev.histogram <= 0 && isBullishTrend && rsiVal < 70 && isGreenCandle) {
         backtestSignals.push({ type: 'buy', price: close, localIndex: i, label: 'Trend' });
@@ -947,6 +1195,7 @@ const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) 
       }
     }
 
+    // RSI dip/top “vibes”
     const longTermTrend = sma200Full[i];
     if (longTermTrend !== null) {
       const macroBull = close > longTermTrend;
@@ -976,42 +1225,58 @@ const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) 
   }
   patterns.signals = filteredChartSignals;
 
-  const current = slice[slice.length-1].close;
-  const trendDir = trend.slope * 365 > 0.1
-    ? 'rising'
-    : trend.slope * 365 < -0.1
-      ? 'falling'
-      : 'sideways';
+  // --- Trend score ---
+  const current = slice[slice.length - 1].close;
+  const trendSlopeAnnual = trend.slope * 365;
+  const trendDir =
+    trendSlopeAnnual > 0.1 ? 'rising' :
+    trendSlopeAnnual < -0.1 ? 'falling' :
+    'sideways';
+
   let score = trendDir === 'rising' ? 30 : trendDir === 'falling' ? -30 : 0;
+
+  const mlLast = trend.slope * (slice.length - 1) + trend.intercept;
   const trendStatus =
-    current > Math.exp(trend.slope * (slice.length-1) + trend.intercept + 2.0 * trend.sigma)
-      ? 'break_up'
-      : current < Math.exp(trend.slope * (slice.length-1) + trend.intercept - 2.0 * trend.sigma)
-        ? 'break_down'
-        : 'inside';
+    current > Math.exp(mlLast + 2.0 * trend.sigma) ? 'break_up' :
+    current < Math.exp(mlLast - 2.0 * trend.sigma) ? 'break_down' :
+    'inside';
+
   if (trendStatus === 'break_up') score += 20;
   else if (trendStatus === 'break_down') score -= 20;
+
   if (rsi < 30) score += 10;
   if (rsi > 70) score -= 10;
 
+  // --- Derivatives overlays on score ---
   let derivativesRisk = 'NONE';
   let smartMoneyDelta = 0;
   let derivativesSentiment = 'Neutral';
+
   if (derivatives && derivatives.binanceTop && derivatives.binanceGlobal) {
-    smartMoneyDelta = (derivatives.binanceTop.positions.longPct || 0) -
-                      (derivatives.binanceGlobal.longPct || 0);
+    smartMoneyDelta =
+      (derivatives.binanceTop.positions.longPct || 0) -
+      (derivatives.binanceGlobal.longPct || 0);
+
     if (smartMoneyDelta > 0.05) {
-      score += 15; derivativesSentiment = 'Bullish Divergence';
+      score += 15;
+      derivativesSentiment = 'Bullish Divergence';
     } else if (smartMoneyDelta < -0.05) {
-      score -= 15; derivativesSentiment = 'Bearish Divergence';
+      score -= 15;
+      derivativesSentiment = 'Bearish Divergence';
     }
+
     if (derivatives.binanceGlobal.ratio > 2.5) {
-      score -= 20; derivativesRisk = 'LONG_CROWDED'; derivativesSentiment = 'Overcrowded Longs';
+      score -= 20;
+      derivativesRisk = 'LONG_CROWDED';
+      derivativesSentiment = 'Overcrowded Longs';
     } else if (derivatives.binanceGlobal.ratio < 0.7) {
-      score += 20; derivativesRisk = 'SHORT_CROWDED'; derivativesSentiment = 'Overcrowded Shorts';
+      score += 20;
+      derivativesRisk = 'SHORT_CROWDED';
+      derivativesSentiment = 'Overcrowded Shorts';
     }
   }
 
+  // --- Fib + regime ---
   const fibSwing = findFibSwing(slice, patterns);
   const fibLevels = calculateFibLevels(fibSwing);
   let fibPocket = null;
@@ -1019,26 +1284,50 @@ const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) 
     const golden = fibLevels.filter(f => f.ratio === 0.5 || f.ratio === 0.618);
     if (golden.length) {
       fibPocket = {
-        low: Math.min(...golden.map(g=>g.price)),
-        high: Math.max(...golden.map(g=>g.price))
+        low: Math.min(...golden.map(g => g.price)),
+        high: Math.max(...golden.map(g => g.price))
       };
     }
   }
 
   let regime = 'RANGING';
-  if (adxVal > 25) {
-    regime = (adxVal > 35) ? 'STRONG_TREND' : 'TRENDING';
+  if (adxVal > 25) regime = adxVal > 35 ? 'STRONG_TREND' : 'TRENDING';
+
+  // --- Funding / OI stats over full history ---
+  const lastSlice = slice[slice.length - 1];
+
+  const fundingAll = data.map(d => d.fundingRate);
+  const fundingStats = computeDistributionStats(fundingAll, lastSlice.fundingRate);
+  const fundingExtreme = classifyFundingExtreme(fundingStats);
+
+  const oiChangesAll = data.map(d => d.oiChangePct);
+  const lastOiChange = lastSlice.oiChangePct;
+  const oiStats = computeDistributionStats(oiChangesAll, lastOiChange);
+
+  let oiFlowLabel = 'Neutral';
+  if (slice.length > 1 && Number.isFinite(lastOiChange)) {
+    const prevClose = slice[slice.length - 2].close;
+    const priceChange =
+      prevClose && Number.isFinite(prevClose)
+        ? (lastSlice.close - prevClose) / prevClose
+        : 0;
+    oiFlowLabel = classifyOpenInterestFlow(priceChange, lastOiChange, oiStats);
   }
 
+  // --- Build chart data slice with overlays ---
   const processed = slice.map((d, i) => {
     const ml = trend.slope * i + trend.intercept;
-    let resY = null, supY = null;
+    let resY = null;
+    let supY = null;
+
     if (patterns.resLine && i >= patterns.resLine.p1.localIndex) {
-      resY = patterns.resLine.p1.high +
+      resY =
+        patterns.resLine.p1.high +
         patterns.resLine.slope * (i - patterns.resLine.p1.localIndex);
     }
     if (patterns.supLine && i >= patterns.supLine.p1.localIndex) {
-      supY = patterns.supLine.p1.low +
+      supY =
+        patterns.supLine.p1.low +
         patterns.supLine.slope * (i - patterns.supLine.p1.localIndex);
     }
 
@@ -1060,10 +1349,11 @@ const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) 
 
   const currentTrendFilter = maFilterFull[maFilterFull.length - 1];
 
-  let macdHist = 0, prevMacdHist = 0;
+  let macdHist = 0;
+  let prevMacdHist = 0;
   if (macdSlice.length >= 2) {
-    macdHist = macdSlice[macdSlice.length-1]?.histogram ?? 0;
-    prevMacdHist = macdSlice[macdSlice.length-2]?.histogram ?? 0;
+    macdHist = macdSlice[macdSlice.length - 1]?.histogram ?? 0;
+    prevMacdHist = macdSlice[macdSlice.length - 2]?.histogram ?? 0;
   }
 
   const tradeSetups = calculateTradeSetups(
@@ -1071,7 +1361,7 @@ const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) 
     current,
     patterns.supLevels,
     patterns.resLevels,
-    atrSlice[atrSlice.length-1],
+    atrSlice[atrSlice.length - 1],
     score,
     { hist: macdHist, prevHist: prevMacdHist },
     regime,
@@ -1082,8 +1372,9 @@ const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) 
     patterns,
     currentTrendFilter
   );
+
   const backtestStats = runBacktest(data, backtestSignals, atrFull, config.days);
-  const velocity = adxSlope > 0 ? "Accelerating" : "Decelerating";
+  const velocity = adxSlope > 0 ? 'Accelerating' : 'Decelerating';
 
   return {
     data: processed,
@@ -1095,25 +1386,31 @@ const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) 
     rsi,
     regime,
     adx: adxVal,
-    atrPct: atrSlice[atrSlice.length-1]/current,
+    atrPct: atrSlice[atrSlice.length - 1] / current,
     tradeSetups,
     backtestStats,
     fib: { swing: fibSwing, levels: fibLevels, goldenPocket: fibPocket },
-    smartSupports: patterns.supLevels.slice(0,3).map(s => ({
+    smartSupports: patterns.supLevels.slice(0, 3).map(s => ({
       ...s,
-      width: 1 + getVolumeStrength(s.price, vp)*3
+      width: 1 + getVolumeStrength(s.price, vp) * 3
     })),
-    smartResistances: patterns.resLevels.slice(0,3).map(r => ({
+    smartResistances: patterns.resLevels.slice(0, 3).map(r => ({
       ...r,
-      width: 1 + getVolumeStrength(r.price, vp)*3
+      width: 1 + getVolumeStrength(r.price, vp) * 3
     })),
     derivatives,
     derivativesRisk,
     smartMoneyDelta,
     derivativesSentiment,
-    velocity
+    velocity,
+    fundingStats,
+    fundingExtreme,
+    oiStats,
+    oiFlowLabel
   };
 };
+
+
 
 
 // --- COMPONENTS ---
@@ -1276,7 +1573,11 @@ const App = () => {
     derivativesRisk,
     smartMoneyDelta,
     derivativesSentiment,
-    velocity
+    velocity,
+    fundingStats,
+    fundingExtreme,
+    oiStats,
+    oiFlowLabel,
   } = analysis;
 
   return (
@@ -1347,6 +1648,51 @@ const App = () => {
               >
                 <Percent className="w-3 h-3" />
                 Funding {formatPercent(fundingRealTime.rate)}
+              </span>
+            )}
+            {fundingStats && fundingExtreme && (
+              <span
+                className={`px-2 py-1 rounded flex items-center gap-1 ${
+                  fundingExtreme.side === 'long'
+                    ? 'bg-rose-100 text-rose-700'
+                    : fundingExtreme.side === 'short'
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : 'bg-slate-100 text-slate-600'
+                }`}
+              >
+                <Percent className="w-3 h-3" />
+                <span className="uppercase text-[9px] tracking-widest">
+                  Hist Funding
+                </span>
+                <span className="font-mono">
+                  {fundingStats.percentile.toFixed(0)}th
+                </span>
+                <span className="normal-case">
+                  {fundingExtreme.label}
+                </span>
+              </span>
+            )}
+
+            {oiStats && oiFlowLabel && (
+              <span
+                className={`px-2 py-1 rounded flex items-center gap-1 ${
+                  oiFlowLabel.includes('Short Squeeze') ||
+                  oiFlowLabel.includes('New Longs') ||
+                  oiFlowLabel.includes('Long Build')
+                    ? 'bg-emerald-100 text-emerald-700'
+                    : oiFlowLabel.includes('Aggressive Shorting') ||
+                      oiFlowLabel.includes('Liquidation')
+                      ? 'bg-rose-100 text-rose-700'
+                      : 'bg-slate-100 text-slate-600'
+                }`}
+              >
+                <DollarSign className="w-3 h-3" />
+                <span className="uppercase text-[9px] tracking-widest">
+                  OI Flow
+                </span>
+                <span className="normal-case">
+                  {oiFlowLabel}
+                </span>
               </span>
             )}
             {analysis.derivatives && (
@@ -1598,10 +1944,10 @@ const App = () => {
             </ResponsiveContainer>
           </div>
 
-          {/* SUB-STRIP: MACD + Funding / L-S History */}
-          <div className="h-40 w-full border-t border-slate-100 bg-slate-50/50 pr-4 pt-2 flex flex-col gap-2">
+          {/* SUB-STRIP: MACD + Funding / L-S History + Fear & Greed */}
+          <div className="h-60 w-full border-t border-slate-100 bg-slate-50/50 pr-4 pt-2 flex flex-col gap-2">
             {/* MACD MINI-CHART */}
-            <div className="h-1/2 w-full">
+            <div className="h-1/3 w-full">
               <ResponsiveContainer>
                 <ComposedChart
                   data={analysis.data}
@@ -1611,7 +1957,7 @@ const App = () => {
                   {/* hide X-axis here since the main chart already shows dates */}
                   <XAxis dataKey="date" hide />
 
-                  {/* align Y with main chart: right-only axis */}
+                  {/* single MACD axis, right side, no ticks */}
                   <YAxis
                     yAxisId="macd"
                     orientation="right"
@@ -1672,31 +2018,35 @@ const App = () => {
               </ResponsiveContainer>
             </div>
 
-            {/* FUNDING + LONG/SHORT HISTORY */}
-            <div className="h-1/2 w-full">
+            {/* FUNDING + OI + LONG/SHORT HISTORY */}
+            <div className="h-1/3 w-full">
               <ResponsiveContainer>
                 <ComposedChart
                   data={analysis.data}
                   syncId="btc-sync"
                   margin={{ top: 0, right: 60, left: 0, bottom: 0 }}
                 >
-                  {/* Hide X-axis here since the main chart already shows dates */}
                   <XAxis dataKey="date" hide />
 
-                  {/* funding axis: right, hidden (no extra left margin) */}
+                  {/* All axes on the RIGHT so width matches main chart */}
                   <YAxis
                     yAxisId="funding"
                     orientation="right"
                     hide
                     domain={['auto', 'auto']}
                   />
-                  {/* visible ratio axis, also on the right so charts align */}
+                  <YAxis
+                    yAxisId="oi"
+                    orientation="right"
+                    hide
+                    domain={['auto', 'auto']}
+                  />
                   <YAxis
                     yAxisId="ratio"
                     orientation="right"
-                    tick={{ fontSize: 8, fill: '#64748b' }}
                     axisLine={false}
                     tickLine={false}
+                    tick={{ fontSize: 8, fill: '#64748b' }}
                     domain={[0, 'auto']}
                     tickFormatter={(v) => `${v.toFixed(1)}x`}
                   />
@@ -1714,32 +2064,31 @@ const App = () => {
                     labelStyle={{ color: '#cbd5f5', marginBottom: '0.15rem' }}
                     formatter={(value, name) => {
                       const safe = (v) =>
-                        v === null ||
-                        v === undefined ||
-                        !Number.isFinite(v)
-                          ? null
-                          : v;
+                        v === null || v === undefined || !Number.isFinite(v) ? null : v;
 
                       if (name === 'fundingRate') {
                         const v = safe(value);
-                        return [
-                          v === null ? '-' : `${(v * 100).toFixed(3)}%`,
-                          'Funding',
-                        ];
+                        return [v === null ? '-' : `${(v * 100).toFixed(3)}%`, 'Funding'];
                       }
                       if (name === 'globalLsRatio') {
                         const v = safe(value);
-                        return [
-                          v === null ? '-' : `${v.toFixed(2)}x`,
-                          'Global L/S',
-                        ];
+                        return [v === null ? '-' : `${v.toFixed(2)}x`, 'Global L/S'];
                       }
                       if (name === 'topLsRatio') {
                         const v = safe(value);
-                        return [
-                          v === null ? '-' : `${v.toFixed(2)}x`,
-                          'Whales L/S',
-                        ];
+                        return [v === null ? '-' : `${v.toFixed(2)}x`, 'Whales L/S'];
+                      }
+                      if (name === 'openInterestUsd') {
+                        const v = safe(value);
+                        if (v === null) return ['-', 'Open Interest'];
+                        const abs = Math.abs(v);
+                        const label =
+                          abs >= 1e9
+                            ? (v / 1e9).toFixed(2) + 'B'
+                            : abs >= 1e6
+                            ? (v / 1e6).toFixed(2) + 'M'
+                            : v.toFixed(0);
+                        return [label, 'Open Interest (notional)'];
                       }
                       return [value, name];
                     }}
@@ -1752,12 +2101,26 @@ const App = () => {
                     strokeDasharray="3 3"
                   />
 
+                  {/* Funding histogram */}
                   <Bar
                     yAxisId="funding"
                     dataKey="fundingRate"
                     barSize={2}
                     fill="#e5e7eb"
                   />
+
+                  {/* OI line (USD notional) */}
+                  <Line
+                    yAxisId="oi"
+                    type="monotone"
+                    dataKey="openInterestUsd"
+                    stroke="#22c55e"
+                    strokeWidth={1}
+                    dot={false}
+                    strokeOpacity={0.7}
+                  />
+
+                  {/* L/S ratios (share visible ratio axis) */}
                   <Line
                     yAxisId="ratio"
                     type="monotone"
@@ -1773,6 +2136,86 @@ const App = () => {
                     stroke="#fb923c"
                     strokeWidth={1}
                     dot={false}
+                  />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* FEAR & GREED HISTORY */}
+            <div className="h-1/3 w-full">
+              <ResponsiveContainer>
+                <ComposedChart
+                  data={analysis.data}
+                  syncId="btc-sync"
+                  margin={{ top: 0, right: 60, left: 0, bottom: 0 }}
+                >
+                  <XAxis dataKey="date" hide />
+                  <YAxis
+                    yAxisId="fng"
+                    orientation="right"
+                    axisLine={false}
+                    tickLine={false}
+                    tick={{ fontSize: 8, fill: '#64748b' }}
+                    domain={[0, 100]}
+                  />
+                  <Tooltip
+                    cursor={{ stroke: '#e2e8f0', strokeWidth: 1 }}
+                    contentStyle={{
+                      background: 'rgba(15,23,42,0.9)',
+                      borderRadius: 8,
+                      border: '1px solid rgba(148,163,184,0.6)',
+                      boxShadow: '0 10px 15px -3px rgba(15,23,42,0.5)',
+                      fontSize: '10px',
+                      color: '#e2e8f0',
+                    }}
+                    labelStyle={{ color: '#cbd5f5', marginBottom: '0.15rem' }}
+                    formatter={(value, name, props) => {
+                      const v =
+                        value === null || value === undefined || !Number.isFinite(value)
+                          ? null
+                          : value;
+                      const classification =
+                        props && props.payload && props.payload.fearGreedClass
+                          ? props.payload.fearGreedClass
+                          : '';
+                      return [
+                        v === null ? '-' : v.toFixed(0),
+                        classification || 'Fear & Greed',
+                      ];
+                    }}
+                  />
+
+                  {/* Thresholds: 25 (Extreme Fear), 75 (Extreme Greed), 50 midline */}
+                  <ReferenceLine
+                    yAxisId="fng"
+                    y={25}
+                    stroke="#ef4444"
+                    strokeDasharray="3 3"
+                    strokeOpacity={0.5}
+                  />
+                  <ReferenceLine
+                    yAxisId="fng"
+                    y={75}
+                    stroke="#22c55e"
+                    strokeDasharray="3 3"
+                    strokeOpacity={0.5}
+                  />
+                  <ReferenceLine
+                    yAxisId="fng"
+                    y={50}
+                    stroke="#64748b"
+                    strokeDasharray="3 3"
+                    strokeOpacity={0.4}
+                  />
+
+                  <Line
+                    yAxisId="fng"
+                    type="monotone"
+                    dataKey="fearGreed"
+                    stroke="#f59e0b"
+                    strokeWidth={1.5}
+                    dot={false}
+                    strokeOpacity={0.9}
                   />
                 </ComposedChart>
               </ResponsiveContainer>
