@@ -107,21 +107,56 @@ async function fetchJson(targetUrl) {
 
 // Fetch Historical Funding (per day)
 async function fetchFundingHistory() {
+  const history = {};
   try {
-    const data = await fetchJson('https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1000');
-    const history = {};
-    if (Array.isArray(data)) {
-      data.forEach(d => {
-        const dateStr = new Date(d.fundingTime).toISOString().split('T')[0];
+    const symbol = 'BTCUSDT';
+    const limit = 1000;
+
+    // Earliest futures funding you care about.
+    // 2019-01-01 is safely before Binance BTCUSDT perp history.
+    let startTime = Date.UTC(2019, 0, 1); // Jan 1, 2019 UTC in ms
+    const now = Date.now();
+
+    // Safety so we don't loop forever if Binance changes something
+    let pageCount = 0;
+    const MAX_PAGES = 10; // ~10 * 1000 * 8h ≈ many years of data
+
+    while (startTime < now && pageCount < MAX_PAGES) {
+      const url =
+        `https://fapi.binance.com/fapi/v1/fundingRate` +
+        `?symbol=${symbol}&limit=${limit}&startTime=${startTime}`;
+
+      const batch = await fetchJson(url);
+
+      if (!Array.isArray(batch) || batch.length === 0) {
+        break; // nothing more to fetch
+      }
+
+      for (const d of batch) {
+        const t = d.fundingTime || d.fundingTime === 0 ? d.fundingTime : null;
+        const r = parseFloat(d.fundingRate);
+        if (!t || !Number.isFinite(r)) continue;
+
+        const dateStr = new Date(t).toISOString().split('T')[0];
         if (!history[dateStr]) history[dateStr] = [];
-        history[dateStr].push(parseFloat(d.fundingRate));
-      });
+        history[dateStr].push(r);
+      }
+
+      // Move startTime forward to just after the last fundingTime we saw
+      const lastTime = Math.max(...batch.map(x => x.fundingTime || 0));
+      if (!Number.isFinite(lastTime) || lastTime <= startTime) break;
+
+      startTime = lastTime + 1;
+      pageCount += 1;
     }
+
     return history;
-  } catch(e) {
-    return {};
+  } catch (e) {
+    console.error('Funding history fetch failed', e);
+    return history; // return whatever we accumulated
   }
 }
+
 
 // Fetch Historical Global vs Top Long/Short Ratios (per day)
 async function fetchLongShortHistory() {
