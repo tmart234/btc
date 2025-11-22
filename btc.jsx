@@ -75,6 +75,64 @@ const Timer       = (props) => <Icon {...props}>⏱️</Icon>;
 const Clock       = (props) => <Icon {...props}>🕒</Icon>;
 const Percent     = (props) => <Icon {...props}>%</Icon>;
 
+// --- 0. SENTIMENT Z-SCORE HELPERS (NEW) ---
+
+const calculateMean = (data) => {
+  const clean = data.filter(
+    (v) => v !== null && v !== undefined && Number.isFinite(v)
+  );
+  if (!clean.length) return 0;
+  const sum = clean.reduce((a, b) => a + b, 0);
+  return sum / clean.length;
+};
+
+const calculateStdDev = (data, mean) => {
+  const clean = data.filter(
+    (v) => v !== null && v !== undefined && Number.isFinite(v)
+  );
+  if (clean.length < 2) return 0;
+  const squareDiffs = clean.map((value) => {
+    const diff = value - mean;
+    return diff * diff;
+  });
+  const avgSquareDiff = calculateMean(squareDiffs);
+  return Math.sqrt(avgSquareDiff);
+};
+
+const calculateRollingZScore = (dataArray, windowSize = 180) => {
+  const len = dataArray.length;
+  const zScores = new Array(len).fill(null);
+  const minPeriods = Math.max(30, Math.floor(windowSize / 6));
+
+  for (let i = 0; i < len; i++) {
+    const val = dataArray[i];
+    if (val === null || val === undefined || !Number.isFinite(val)) {
+      zScores[i] = null;
+      continue;
+    }
+
+    const start = Math.max(0, i - windowSize + 1);
+    const slice = [];
+    for (let j = start; j <= i; j++) {
+      const v = dataArray[j];
+      if (v !== null && v !== undefined && Number.isFinite(v)) {
+        slice.push(v);
+      }
+    }
+
+    if (slice.length < minPeriods) {
+      zScores[i] = null;
+      continue;
+    }
+
+    const mean = calculateMean(slice);
+    const std = calculateStdDev(slice, mean);
+    zScores[i] = std === 0 ? 0 : (val - mean) / std;
+  }
+
+  return zScores;
+};
+
 
 // --- 1. DATA FETCHING & PROXIES ---
 
@@ -416,7 +474,67 @@ const fetchMarketData = async () => {
         });
       }
     });
+    (function computeSentimentZ() {
+      if (!cleanData.length) return;
 
+      const volatility = 5;
+
+      // A. Simulate Google Trends series per bar
+      for (let i = 0; i < cleanData.length; i++) {
+        const row = cleanData[i];
+        const prev = cleanData[i - 1] || {};
+
+        const prevBuy = i > 0 && Number.isFinite(prev.gtBuy) ? prev.gtBuy : 50;
+        const prevCrash = i > 0 && Number.isFinite(prev.gtCrash) ? prev.gtCrash : 20;
+        const prevBtc = i > 0 && Number.isFinite(prev.gtBtc) ? prev.gtBtc : 60;
+
+        let buy = prevBuy + (Math.random() * volatility * 2 - volatility);
+        let crash = prevCrash + (Math.random() * volatility * 2 - volatility);
+        let btc = prevBtc + (Math.random() * volatility * 2 - volatility);
+
+        // Tie the "vibes" loosely to Fear & Greed
+        if (Number.isFinite(row.fearGreed)) {
+          if (row.fearGreed > 70) {
+            buy += 1;      // more FOMO when greedy
+            crash -= 0.5;
+          } else if (row.fearGreed < 30) {
+            crash += 1;    // more panic when fearful
+            buy -= 0.5;
+          }
+        }
+
+        // clamp to [0, 100] like real GT
+        buy = Math.max(0, Math.min(100, buy));
+        crash = Math.max(0, Math.min(100, crash));
+        btc = Math.max(0, Math.min(100, btc));
+
+        row.gtBuy = buy;
+        row.gtCrash = crash;
+        row.gtBtc = btc;
+      }
+
+      // B. Build composite & F&G arrays for Z-score
+      const compositeRaw = cleanData.map((d) =>
+        0.5 * d.gtBuy + -0.3 * d.gtCrash + 0.2 * d.gtBtc
+      );
+      const fngVals = cleanData.map((d) =>
+        Number.isFinite(d.fearGreed) ? d.fearGreed : null
+      );
+
+      // C. Rolling Z-scores (window 180 days)
+      const compositeZ = calculateRollingZScore(compositeRaw, 180);
+      const fngZ = calculateRollingZScore(fngVals, 180);
+
+      // D. Attach to each bar
+      cleanData.forEach((row, i) => {
+        row.gtCompositeZ = compositeZ[i];  // Google Trends composite Z
+        row.fearGreedZ = fngZ[i];          // Fear & Greed Z
+        row.fgGtDivergence =
+          fngZ[i] != null && compositeZ[i] != null
+            ? fngZ[i] - compositeZ[i]
+            : null;
+      });
+    })();
     // light forward-fill + ΔOI (unchanged)
     for (let i = 1; i < cleanData.length; i++) {
       const cur = cleanData[i];
@@ -1580,6 +1698,10 @@ const App = () => {
     oiFlowLabel,
   } = analysis;
 
+  const lastRow = analysis.data[analysis.data.length - 1] || {};
+  const lastFgZ = lastRow.fearGreedZ;
+  const lastGtZ = lastRow.gtCompositeZ;
+  
   return (
     <div className="max-w-6xl mx-auto bg-slate-50 p-6 font-sans text-slate-900">
       {/* HEADER */}
@@ -1603,6 +1725,7 @@ const App = () => {
                 <Users className="w-3 h-3" /> {derivativesSentiment}
               </span>
             )}
+
             {Number.isFinite(smartMoneyDelta) && (
               <span className="px-2 py-1 rounded flex items-center gap-1 bg-white border border-slate-200 text-slate-700">
                 <Target className="w-3 h-3" />
@@ -1615,6 +1738,7 @@ const App = () => {
                 </span>
               </span>
             )}
+
             <span
               className={`px-2 py-1 rounded flex items-center gap-1 ${
                 regime === 'STRONG_TREND'
@@ -1624,9 +1748,11 @@ const App = () => {
             >
               <Gauge className="w-3 h-3" /> {regime.replace('_', ' ')}
             </span>
+
             <span className="bg-white border border-slate-200 px-2 py-1 rounded flex items-center gap-1">
               <Zap className="w-3 h-3" /> ADX {adx.toFixed(0)}
             </span>
+
             <span
               className={`border px-2 py-1 rounded flex items-center gap-1 ${
                 velocity === 'Accelerating'
@@ -1636,6 +1762,7 @@ const App = () => {
             >
               <Timer className="w-3 h-3" /> {velocity}
             </span>
+
             {fundingRealTime && (
               <span
                 className={`px-2 py-1 rounded flex items-center gap-1 ${
@@ -1650,6 +1777,7 @@ const App = () => {
                 Funding {formatPercent(fundingRealTime.rate)}
               </span>
             )}
+
             {fundingStats && fundingExtreme && (
               <span
                 className={`px-2 py-1 rounded flex items-center gap-1 ${
@@ -1669,6 +1797,32 @@ const App = () => {
                 </span>
                 <span className="normal-case">
                   {fundingExtreme.label}
+                </span>
+              </span>
+            )}
+
+            {/* NEW: F&G Z-SCORE CHIP */}
+            {Number.isFinite(lastFgZ) && (
+              <span className="px-2 py-1 rounded flex items-center gap-1 bg-slate-100 text-slate-700">
+                <BrainCircuit className="w-3 h-3" />
+                <span className="uppercase text-[9px] tracking-widest">
+                  F&amp;G Z
+                </span>
+                <span className="font-mono">
+                  {lastFgZ.toFixed(2)}
+                </span>
+              </span>
+            )}
+
+            {/* NEW: GOOGLE TRENDS COMPOSITE Z CHIP */}
+            {Number.isFinite(lastGtZ) && (
+              <span className="px-2 py-1 rounded flex items-center gap-1 bg-slate-100 text-slate-700">
+                <Activity className="w-3 h-3" />
+                <span className="uppercase text-[9px] tracking-widest">
+                  GT Z
+                </span>
+                <span className="font-mono">
+                  {lastGtZ.toFixed(2)}
                 </span>
               </span>
             )}
@@ -1695,6 +1849,7 @@ const App = () => {
                 </span>
               </span>
             )}
+
             {analysis.derivatives && (
               <span className="px-2 py-1 rounded flex items-center gap-1 bg-slate-100 text-slate-700">
                 <Users className="w-3 h-3" />
@@ -2141,7 +2296,7 @@ const App = () => {
               </ResponsiveContainer>
             </div>
 
-            {/* FEAR & GREED HISTORY */}
+            {/* FEAR & GREED Z-SCORE + GT COMPOSITE Z (NEW) */}
             <div className="h-1/3 w-full">
               <ResponsiveContainer>
                 <ComposedChart
@@ -2156,7 +2311,7 @@ const App = () => {
                     axisLine={false}
                     tickLine={false}
                     tick={{ fontSize: 8, fill: '#64748b' }}
-                    domain={[0, 100]}
+                    domain={['auto', 'auto']}
                   />
                   <Tooltip
                     cursor={{ stroke: '#e2e8f0', strokeWidth: 1 }}
@@ -2164,58 +2319,74 @@ const App = () => {
                       background: 'rgba(15,23,42,0.9)',
                       borderRadius: 8,
                       border: '1px solid rgba(148,163,184,0.6)',
-                      boxShadow: '0 10px 15px -3px rgba(15,23,42,0.5)',
+                      boxShadow:
+                        '0 10px 15px -3px rgba(15,23,42,0.5)',
                       fontSize: '10px',
                       color: '#e2e8f0',
                     }}
-                    labelStyle={{ color: '#cbd5f5', marginBottom: '0.15rem' }}
-                    formatter={(value, name, props) => {
-                      const v =
-                        value === null || value === undefined || !Number.isFinite(value)
+                    labelStyle={{
+                      color: '#cbd5f5',
+                      marginBottom: '0.15rem',
+                    }}
+                    formatter={(value, name) => {
+                      const safe =
+                        value === null ||
+                        value === undefined ||
+                        !Number.isFinite(value)
                           ? null
                           : value;
-                      const classification =
-                        props && props.payload && props.payload.fearGreedClass
-                          ? props.payload.fearGreedClass
-                          : '';
+                      let label = name;
+                      if (name === 'fearGreedZ') label = 'F&G Z';
+                      if (name === 'gtCompositeZ') label = 'GT Composite Z';
                       return [
-                        v === null ? '-' : v.toFixed(0),
-                        classification || 'Fear & Greed',
+                        safe === null ? '-' : safe.toFixed(2),
+                        label,
                       ];
                     }}
                   />
 
-                  {/* Thresholds: 25 (Extreme Fear), 75 (Extreme Greed), 50 midline */}
+                  {/* Neutral + rough ±2σ guides */}
                   <ReferenceLine
                     yAxisId="fng"
-                    y={25}
-                    stroke="#ef4444"
-                    strokeDasharray="3 3"
-                    strokeOpacity={0.5}
-                  />
-                  <ReferenceLine
-                    yAxisId="fng"
-                    y={75}
-                    stroke="#22c55e"
-                    strokeDasharray="3 3"
-                    strokeOpacity={0.5}
-                  />
-                  <ReferenceLine
-                    yAxisId="fng"
-                    y={50}
+                    y={0}
                     stroke="#64748b"
                     strokeDasharray="3 3"
-                    strokeOpacity={0.4}
+                    strokeOpacity={0.7}
+                  />
+                  <ReferenceLine
+                    yAxisId="fng"
+                    y={2}
+                    stroke="#22c55e"
+                    strokeDasharray="3 3"
+                    strokeOpacity={0.3}
+                  />
+                  <ReferenceLine
+                    yAxisId="fng"
+                    y={-2}
+                    stroke="#ef4444"
+                    strokeDasharray="3 3"
+                    strokeOpacity={0.3}
                   />
 
                   <Line
                     yAxisId="fng"
                     type="monotone"
-                    dataKey="fearGreed"
-                    stroke="#f59e0b"
+                    dataKey="fearGreedZ"
+                    stroke="#22c55e"
                     strokeWidth={1.5}
                     dot={false}
                     strokeOpacity={0.9}
+                    name="F&G Z"
+                  />
+                  <Line
+                    yAxisId="fng"
+                    type="monotone"
+                    dataKey="gtCompositeZ"
+                    stroke="#3b82f6"
+                    strokeWidth={1.2}
+                    dot={false}
+                    strokeOpacity={0.8}
+                    name="GT Composite Z"
                   />
                 </ComposedChart>
               </ResponsiveContainer>
