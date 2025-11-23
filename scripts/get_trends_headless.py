@@ -2,12 +2,14 @@ import os
 import time
 import json
 import glob
+import random
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from selenium_stealth import stealth
 
 # --- CONFIGURATION ---
 KEYWORD = "bitcoin"
@@ -22,16 +24,15 @@ if not os.path.exists("public"):
     os.makedirs("public")
 
 def scrape_trends():
-    print(f"🚀 Starting HEADLESS scraper for '{KEYWORD}'...")
+    print(f"🚀 Starting STEALTH scraper for '{KEYWORD}'...")
 
     chrome_options = Options()
-    # Standard headless flags
     chrome_options.add_argument("--headless=new") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-    # IMPORTANT: Use a real User-Agent to look less like a bot
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    # Note: selenium-stealth handles the user-agent, but setting a default helps
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
     
     prefs = {
         "download.default_directory": DOWNLOAD_DIR,
@@ -39,6 +40,9 @@ def scrape_trends():
         "directory_upgrade": True
     }
     chrome_options.add_experimental_option("prefs", prefs)
+    # Hide automation control flag
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
 
     driver = None
     try:
@@ -50,57 +54,75 @@ def scrape_trends():
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=chrome_options)
 
+        # --- APPLY STEALTH SETTINGS ---
+        # This overrides JS variables that usually give away the bot
+        stealth(driver,
+            languages=["en-US", "en"],
+            vendor="Google Inc.",
+            platform="Win32",
+            webgl_vendor="Intel Inc.",
+            renderer="Intel Iris OpenGL Engine",
+            fix_hairline=True,
+        )
+
         url = f"https://trends.google.com/trends/explore?date={TIMEFRAME.replace(' ', '%20')}&geo={GEO}&q={KEYWORD}"
         print(f"🔗 Navigating to: {url}")
+        
+        # Random sleep before load to mimic human
+        time.sleep(random.uniform(1, 3))
         driver.get(url)
 
-        # DEBUG: Print Title
         print(f"📄 Page Title: {driver.title}")
 
+        # Check for immediate block
+        if "Error" in driver.title or "429" in driver.page_source:
+            # If blocked, we try a backup strategy: Go Home first, then search
+            print("⚠️ Direct link blocked. Trying Homepage navigation strategy...")
+            driver.delete_all_cookies()
+            time.sleep(5)
+            driver.get("https://trends.google.com/trends/")
+            time.sleep(3)
+            # Now try the link again
+            driver.get(url)
+            
         wait = WebDriverWait(driver, 15)
         
-        # 1. Check for "Too Many Requests" or generic Google errors
-        if "Error" in driver.title or "429" in driver.page_source:
-            raise Exception("Google blocked this IP (429/Error page)")
-
-        # 2. Handle Cookie Banner (Critical in headless)
+        # Cookie Banner
         try:
-            # Try multiple selectors for different regions (EU vs US)
             cookie_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.cookieBarConsentButton")))
             cookie_btn.click()
             print("🍪 Cookie banner clicked")
-            time.sleep(2) # Wait for fade out
+            time.sleep(2)
         except:
-            print("ℹ️ No cookie banner found (or already gone)")
+            pass
 
-        # 3. Wait for Chart
-        print("⏳ Waiting for chart to render...")
-        # Look for the specific export button container
-        download_button_xpath = "(//button[.//i[text()='file_download']])[1]"
+        print("⏳ Waiting for chart...")
         
-        try:
-            btn = wait.until(EC.element_to_be_clickable((By.XPATH, download_button_xpath)))
-            print("✅ Found download button. Clicking...")
-            driver.execute_script("arguments[0].click();", btn)
-        except Exception as e:
-            # CRITICAL DEBUGGING SNAPSHOT
-            print("❌ Could not find/click download button!")
-            print(f"🔎 Current Page URL: {driver.current_url}")
-            raise e
-
-        # 4. Wait for File
-        print("⬇️ Waiting for download...")
-        time.sleep(10) # Give it extra time in CI
+        # Download Button
+        download_button_xpath = "(//button[.//i[text()='file_download']])[1]"
+        btn = wait.until(EC.element_to_be_clickable((By.XPATH, download_button_xpath)))
+        
+        # Human-like pause
+        time.sleep(random.uniform(2, 4))
+        
+        print("✅ Found download button. Clicking...")
+        driver.execute_script("arguments[0].click();", btn)
+        
+        # Wait for download
+        time.sleep(10)
         
         files = glob.glob(os.path.join(DOWNLOAD_DIR, "*.csv"))
         if not files:
-            print(f"📂 Directory contents: {os.listdir(DOWNLOAD_DIR)}")
-            raise Exception("Download clicked but no CSV appeared.")
+            print(f"📂 Dir content: {os.listdir(DOWNLOAD_DIR)}")
+            # Dump debug info
+            timestamp = int(time.time())
+            driver.save_screenshot(f"debug_screenshot_{timestamp}.png")
+            raise Exception("No CSV found after click")
         
         csv_path = files[0]
         print(f"✅ CSV Downloaded: {csv_path}")
 
-        # 5. Convert
+        # Convert
         print("🔄 Converting to JSON...")
         json_output = []
         
@@ -111,7 +133,6 @@ def scrape_trends():
             parts = line.strip().split(',')
             if len(parts) >= 2:
                 date_str = parts[0]
-                # Google CSV format check: YYYY-MM-DD
                 if len(date_str) == 10 and date_str.count('-') == 2:
                     try:
                         val = float(parts[1])
@@ -123,7 +144,7 @@ def scrape_trends():
                         continue
 
         if not json_output:
-            raise Exception("CSV was empty or format changed!")
+            raise Exception("CSV parsed but empty!")
 
         with open(OUTPUT_JSON, 'w') as f:
             json.dump(json_output, f, indent=2)
@@ -132,21 +153,12 @@ def scrape_trends():
 
     except Exception as e:
         print(f"❌ CRITICAL ERROR: {e}")
-        
-        # --- DEBUG ARTIFACT GENERATION ---
         if driver:
             timestamp = int(time.time())
-            screenshot_path = f"debug_screenshot_{timestamp}.png"
-            html_path = f"debug_page_{timestamp}.html"
-            
-            driver.save_screenshot(screenshot_path)
-            with open(html_path, "w", encoding="utf-8") as f:
+            driver.save_screenshot(f"debug_screenshot_{timestamp}.png")
+            with open(f"debug_page_{timestamp}.html", "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
-                
-            print(f"📸 Screenshot saved: {screenshot_path}")
-            print(f"📝 HTML dump saved: {html_path}")
-            # Force exit with error to trigger GitHub Action failure
-            exit(1)
+        exit(1)
 
     finally:
         if driver:
