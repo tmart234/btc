@@ -30,7 +30,7 @@ jobs:
 
       - name: Run Scraper Script
         id: run-script
-        run: python get_trends_headless.py
+        run: python ./scripts/get_trends_headless.py
 
       - name: Upload Debug Artifacts
         if: failure()
