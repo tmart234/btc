@@ -9,6 +9,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium_stealth import stealth
 
 # --- CONFIGURATION ---
@@ -31,7 +32,6 @@ def scrape_trends():
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-    # Note: selenium-stealth handles the user-agent, but setting a default helps
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
     
     prefs = {
@@ -40,7 +40,6 @@ def scrape_trends():
         "directory_upgrade": True
     }
     chrome_options.add_experimental_option("prefs", prefs)
-    # Hide automation control flag
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
 
@@ -54,8 +53,6 @@ def scrape_trends():
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=chrome_options)
 
-        # --- APPLY STEALTH SETTINGS ---
-        # This overrides JS variables that usually give away the bot
         stealth(driver,
             languages=["en-US", "en"],
             vendor="Google Inc.",
@@ -68,21 +65,16 @@ def scrape_trends():
         url = f"https://trends.google.com/trends/explore?date={TIMEFRAME.replace(' ', '%20')}&geo={GEO}&q={KEYWORD}"
         print(f"🔗 Navigating to: {url}")
         
-        # Random sleep before load to mimic human
         time.sleep(random.uniform(1, 3))
         driver.get(url)
 
-        print(f"📄 Page Title: {driver.title}")
-
-        # Check for immediate block
+        # Check for blocks
         if "Error" in driver.title or "429" in driver.page_source:
-            # If blocked, we try a backup strategy: Go Home first, then search
-            print("⚠️ Direct link blocked. Trying Homepage navigation strategy...")
+            print("⚠️ Blocked. Retrying via Homepage...")
             driver.delete_all_cookies()
-            time.sleep(5)
+            time.sleep(3)
             driver.get("https://trends.google.com/trends/")
             time.sleep(3)
-            # Now try the link again
             driver.get(url)
             
         wait = WebDriverWait(driver, 15)
@@ -96,28 +88,50 @@ def scrape_trends():
         except:
             pass
 
-        print("⏳ Waiting for chart...")
+        print("⏳ Waiting for chart to render...")
+        # Wait specifically for the timeline chart to appear
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "line-chart-directive")))
+
+        # --- ROBUST BUTTON FINDER ---
+        # Google changes these IDs often. We try 4 different strategies.
+        button_selectors = [
+            "//button[.//i[text()='file_download']]",   # Strategy 1: Icon Text
+            "//button[@aria-label='Export']",           # Strategy 2: Accessibility Label
+            "//button[@title='CSV']",                   # Strategy 3: Title Attribute
+            "(//div[contains(@class, 'widget-actions')]//button)[1]" # Strategy 4: Structure (First button in actions)
+        ]
+
+        btn = None
+        for selector in button_selectors:
+            try:
+                print(f"🔎 Trying selector: {selector}")
+                candidate = driver.find_element(By.XPATH, selector)
+                if candidate.is_displayed():
+                    btn = candidate
+                    print("✅ Button found!")
+                    break
+            except:
+                continue
         
-        # Download Button
-        download_button_xpath = "(//button[.//i[text()='file_download']])[1]"
-        btn = wait.until(EC.element_to_be_clickable((By.XPATH, download_button_xpath)))
-        
-        # Human-like pause
-        time.sleep(random.uniform(2, 4))
-        
-        print("✅ Found download button. Clicking...")
-        driver.execute_script("arguments[0].click();", btn)
+        if not btn:
+            # Last ditch: try to find ANY button in the first widget header
+            print("⚠️ Specific selectors failed. Hunting for generic action button...")
+            btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div.widget-actions-item button")))
+
+        # Click logic
+        print("⬇️ Clicking download...")
+        try:
+            btn.click()
+        except:
+            # If standard click fails, use JS click (bypass overlays)
+            driver.execute_script("arguments[0].click();", btn)
         
         # Wait for download
         time.sleep(10)
         
         files = glob.glob(os.path.join(DOWNLOAD_DIR, "*.csv"))
         if not files:
-            print(f"📂 Dir content: {os.listdir(DOWNLOAD_DIR)}")
-            # Dump debug info
-            timestamp = int(time.time())
-            driver.save_screenshot(f"debug_screenshot_{timestamp}.png")
-            raise Exception("No CSV found after click")
+            raise Exception("No CSV found in directory after click")
         
         csv_path = files[0]
         print(f"✅ CSV Downloaded: {csv_path}")
@@ -152,7 +166,7 @@ def scrape_trends():
         print(f"🎉 Success! Saved {len(json_output)} records.")
 
     except Exception as e:
-        print(f"❌ CRITICAL ERROR: {e}")
+        print(f"❌ ERROR: {e}")
         if driver:
             timestamp = int(time.time())
             driver.save_screenshot(f"debug_screenshot_{timestamp}.png")
