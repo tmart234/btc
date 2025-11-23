@@ -215,6 +215,62 @@ async function fetchFundingHistory() {
   }
 }
 
+// Generate this offline with pytrends and publish alongside the app.
+async function fetchGoogleTrendsHistory() {
+  const history = {};
+  try {
+    const res = await fetch('btc_google_trends.json?t=' + Date.now());
+    if (!res.ok) {
+      console.warn('[GT] trends JSON not found / status', res.status);
+      return history;
+    }
+
+    const rows = await res.json();
+    if (!Array.isArray(rows)) {
+      console.warn('[GT] unexpected payload', rows);
+      return history;
+    }
+
+    rows.forEach((row) => {
+      // try a few common field names for date
+      const rawDate = row.date || row.Date || row.ds;
+      if (!rawDate) return;
+
+      // Normalize: just "YYYY-MM-DD"
+      const dateStr = String(rawDate).slice(0, 10);
+
+      const btcRaw =
+        row.bitcoin ??
+        row.btc ??
+        row.search_bitcoin ??
+        null;
+      const buyRaw =
+        row.buy_bitcoin ??
+        row.buyBitcoin ??
+        row.search_buy_bitcoin ??
+        null;
+      const crashRaw =
+        row.bitcoin_crash ??
+        row.bitcoinCrash ??
+        row.search_bitcoin_crash ??
+        null;
+
+      const btc = Number(btcRaw);
+      const buy = Number(buyRaw);
+      const crash = Number(crashRaw);
+
+      history[dateStr] = {
+        bitcoin: Number.isFinite(btc) ? btc : null,
+        buyBitcoin: Number.isFinite(buy) ? buy : null,
+        bitcoinCrash: Number.isFinite(crash) ? crash : null,
+      };
+    });
+  } catch (e) {
+    console.error('[GT] Google Trends fetch failed', e);
+  }
+  return history;
+}
+
 // Fetch Historical Crypto Fear & Greed Index (per day, keyed by YYYY-MM-DD)
 async function fetchFearGreedHistory() {
   const history = {};
@@ -368,14 +424,14 @@ async function fetchRealTimeFunding() {
   }
 }
 
-// Historical Price + merge in funding + long/short history
+// Historical Price + merge in funding + long/short + OI + FNG + GT
 const fetchMarketData = async () => {
   try {
     let priceData = null;
     const priceUrl =
       'https://min-api.cryptocompare.com/data/v2/histoday?fsym=BTC&tsym=USD&limit=2000';
 
-    // 1) Try direct call (if CORS allows)
+    // 1) Try direct (CryptoCompare usually allows CORS)
     try {
       const res = await fetch(priceUrl);
       console.log('[fetchMarketData] direct histoday status', res.status);
@@ -394,7 +450,7 @@ const fetchMarketData = async () => {
       console.warn('[fetchMarketData] direct histoday failed', e);
     }
 
-    // 2) Fall back to proxies if direct failed or API responded with error
+    // 2) Fall back to proxies if direct failed
     if (!priceData) {
       const json = await fetchJson(priceUrl);
       console.log(
@@ -412,21 +468,30 @@ const fetchMarketData = async () => {
       return null;
     }
 
-    // Pull in all the side-histories in parallel (funding, OI, long/short, FNG)
-    const [fundingHistory, lsHistory, oiHistory, fngHistory] = await Promise.all([
+    // Pull in all the side-histories in parallel
+    const [
+      fundingHistory,
+      lsHistory,
+      oiHistory,
+      fngHistory,
+      gtHistory
+    ] = await Promise.all([
       fetchFundingHistory(),
       fetchLongShortHistory(),
       fetchOpenInterestHistory(),
       fetchFearGreedHistory(),
+      fetchGoogleTrendsHistory(), // NEW
     ]);
 
     const cleanData = [];
+    const compositeRaw = []; // GT composite raw series
+    const fngVals = [];      // Fear & Greed raw series
 
     priceData.forEach((d, i) => {
       if (Number.isFinite(d.close) && Number.isFinite(d.volumeto) && d.close > 0) {
         const dateStr = new Date(d.time * 1000).toISOString().split('T')[0];
 
-        // Daily funding
+        // Daily funding (average of 3x 8h rates)
         let dailyFund = null;
         if (fundingHistory[dateStr]) {
           const rates = fundingHistory[dateStr];
@@ -454,6 +519,24 @@ const fetchMarketData = async () => {
         const fearGreed = Number.isFinite(fng.fearGreed) ? fng.fearGreed : null;
         const fearGreedClass = fng.fearGreedClass || null;
 
+        // Google Trends for this day (if present)
+        const gt = gtHistory[dateStr] || {};
+        const gtBitcoin = Number.isFinite(gt.bitcoin) ? gt.bitcoin : null;
+        const gtBuy = Number.isFinite(gt.buyBitcoin) ? gt.buyBitcoin : null;
+        const gtCrash = Number.isFinite(gt.bitcoinCrash) ? gt.bitcoinCrash : null;
+
+        // Build composite raw: 0.5 * buy - 0.3 * crash + 0.2 * bitcoin
+        let compositeVal = null;
+        if (gtBitcoin != null || gtBuy != null || gtCrash != null) {
+          const b = gtBitcoin ?? 0;
+          const buy = gtBuy ?? 0;
+          const crash = gtCrash ?? 0;
+          compositeVal = 0.5 * buy - 0.3 * crash + 0.2 * b;
+        }
+
+        compositeRaw.push(compositeVal);
+        fngVals.push(fearGreed);
+
         cleanData.push({
           date: dateStr,
           index: i,
@@ -462,80 +545,48 @@ const fetchMarketData = async () => {
           low: d.low,
           close: d.close,
           volume: d.volumeto,
+
           fundingRate: dailyFund,
           globalLsRatio,
           topLsRatio,
+
           openInterest,
           openInterestUsd,
           oiChange: null,
           oiChangePct: null,
+
           fearGreed,
           fearGreedClass,
+
+          // raw GT fields (optional / informational)
+          gtBitcoin,
+          gtBuy,
+          gtCrash,
+
+          // sentiment fields (filled in later)
+          gtCompositeZ: null,
+          fearGreedZ: null,
+          fgGtDivergence: null,
         });
       }
     });
-    (function computeSentimentZ() {
-      if (!cleanData.length) return;
 
-      const volatility = 5;
-
-      // A. Simulate Google Trends series per bar
-      for (let i = 0; i < cleanData.length; i++) {
-        const row = cleanData[i];
-        const prev = cleanData[i - 1] || {};
-
-        const prevBuy = i > 0 && Number.isFinite(prev.gtBuy) ? prev.gtBuy : 50;
-        const prevCrash = i > 0 && Number.isFinite(prev.gtCrash) ? prev.gtCrash : 20;
-        const prevBtc = i > 0 && Number.isFinite(prev.gtBtc) ? prev.gtBtc : 60;
-
-        let buy = prevBuy + (Math.random() * volatility * 2 - volatility);
-        let crash = prevCrash + (Math.random() * volatility * 2 - volatility);
-        let btc = prevBtc + (Math.random() * volatility * 2 - volatility);
-
-        // Tie the "vibes" loosely to Fear & Greed
-        if (Number.isFinite(row.fearGreed)) {
-          if (row.fearGreed > 70) {
-            buy += 1;      // more FOMO when greedy
-            crash -= 0.5;
-          } else if (row.fearGreed < 30) {
-            crash += 1;    // more panic when fearful
-            buy -= 0.5;
-          }
-        }
-
-        // clamp to [0, 100] like real GT
-        buy = Math.max(0, Math.min(100, buy));
-        crash = Math.max(0, Math.min(100, crash));
-        btc = Math.max(0, Math.min(100, btc));
-
-        row.gtBuy = buy;
-        row.gtCrash = crash;
-        row.gtBtc = btc;
-      }
-
-      // B. Build composite & F&G arrays for Z-score
-      const compositeRaw = cleanData.map((d) =>
-        0.5 * d.gtBuy + -0.3 * d.gtCrash + 0.2 * d.gtBtc
-      );
-      const fngVals = cleanData.map((d) =>
-        Number.isFinite(d.fearGreed) ? d.fearGreed : null
-      );
-
-      // C. Rolling Z-scores (window 180 days)
+    // --- Sentiment z-scores (Google Trends vs Fear & Greed) ---
+    if (cleanData.length) {
       const compositeZ = calculateRollingZScore(compositeRaw, 180);
       const fngZ = calculateRollingZScore(fngVals, 180);
 
-      // D. Attach to each bar
       cleanData.forEach((row, i) => {
-        row.gtCompositeZ = compositeZ[i];  // Google Trends composite Z
-        row.fearGreedZ = fngZ[i];          // Fear & Greed Z
+        row.gtCompositeZ = compositeZ[i];
+        row.fearGreedZ = fngZ[i];
         row.fgGtDivergence =
           fngZ[i] != null && compositeZ[i] != null
             ? fngZ[i] - compositeZ[i]
             : null;
       });
-    })();
-    // light forward-fill + ΔOI (unchanged)
+    }
+
+    // --- Light forward-fill + ΔOI (unchanged) ---
     for (let i = 1; i < cleanData.length; i++) {
       const cur = cleanData[i];
       const prev = cleanData[i - 1];
@@ -576,7 +627,6 @@ const fetchMarketData = async () => {
     return null;
   }
 };
-
 
 // Derivatives Snapshot (real-time)
 async function fetchBinanceGlobal() {
@@ -1008,17 +1058,90 @@ const findPatterns = (data, windowSize) => {
 // --- FIBONACCI & BACKTEST ---
 const FIB_LEVELS = [0.382, 0.5, 0.618];
 
-const findFibSwing = (data, patterns) => {
-  if (data.length === 0) return { dir: 'none' };
-  let maxIdx = 0, minIdx = 0;
-  for (let i = 1; i < data.length; i++) {
+const findFibSwing = (data, patterns, trend) => {
+  const len = data.length;
+  if (!len) return { dir: 'none' };
+
+  const slope = trend && typeof trend.slope === 'number' ? trend.slope : 0;
+  const dir =
+    slope > 0.0001 ? 'up'
+      : slope < -0.0001 ? 'down'
+      : 'sideways';
+
+  const highs = (patterns && patterns.majorHighs) || [];
+  const lows  = (patterns && patterns.majorLows)  || [];
+
+  // 1) Pivot-based swing in the direction of trend
+  if (dir === 'up' && highs.length && lows.length) {
+    const lastHigh = highs[highs.length - 1];
+    let anchorLow = null;
+    for (let i = lows.length - 1; i >= 0; i--) {
+      if (lows[i].localIndex < lastHigh.localIndex) {
+        anchorLow = lows[i];
+        break;
+      }
+    }
+    if (anchorLow) {
+      return {
+        dir: 'up',
+        swingHigh: lastHigh.high,
+        swingLow: anchorLow.low,
+        startIndex: anchorLow.localIndex,
+        endIndex: lastHigh.localIndex,
+      };
+    }
+  }
+
+  if (dir === 'down' && highs.length && lows.length) {
+    const lastLow = lows[lows.length - 1];
+    let anchorHigh = null;
+    for (let i = highs.length - 1; i >= 0; i--) {
+      if (highs[i].localIndex < lastLow.localIndex) {
+        anchorHigh = highs[i];
+        break;
+      }
+    }
+    if (anchorHigh) {
+      return {
+        dir: 'down',
+        swingHigh: anchorHigh.high,
+        swingLow: lastLow.low,
+        startIndex: anchorHigh.localIndex,
+        endIndex: lastLow.localIndex,
+      };
+    }
+  }
+
+  // 2) Fallback: last ~120 bars min/max (recent swing, not full 1000d)
+  const lookback = Math.min(120, len);
+  let start = len - lookback;
+  let maxIdx = start;
+  let minIdx = start;
+
+  for (let i = start; i < len; i++) {
     if (data[i].high > data[maxIdx].high) maxIdx = i;
-    if (data[i].low < data[minIdx].low) minIdx = i;
+    if (data[i].low  < data[minIdx].low)  minIdx = i;
+  }
+
+  if (maxIdx === minIdx) {
+    return { dir: 'none' };
   }
   if (maxIdx > minIdx) {
-    return { dir: 'up', swingHigh: data[maxIdx].high, swingLow: data[minIdx].low, startIndex: minIdx, endIndex: maxIdx };
+    return {
+      dir: 'up',
+      swingHigh: data[maxIdx].high,
+      swingLow:  data[minIdx].low,
+      startIndex: minIdx,
+      endIndex:   maxIdx,
+    };
   } else {
-    return { dir: 'down', swingHigh: data[maxIdx].high, swingLow: data[minIdx].low, startIndex: maxIdx, endIndex: minIdx };
+    return {
+      dir: 'down',
+      swingHigh: data[maxIdx].high,
+      swingLow:  data[minIdx].low,
+      startIndex: maxIdx,
+      endIndex:   minIdx,
+    };
   }
 };
 
@@ -1026,11 +1149,12 @@ const calculateFibLevels = (swing) => {
   if (!swing || swing.dir === 'none') return [];
   const diff = swing.swingHigh - swing.swingLow;
   if (diff <= 0) return [];
-  return FIB_LEVELS.map(ratio => ({
+  return FIB_LEVELS.map((ratio) => ({
     ratio,
-    price: swing.dir === 'up'
-      ? swing.swingHigh - diff * ratio
-      : swing.swingLow + diff * ratio
+    price:
+      swing.dir === 'up'
+        ? swing.swingHigh - diff * ratio
+        : swing.swingLow + diff * ratio,
   }));
 };
 
@@ -1395,7 +1519,7 @@ const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) 
   }
 
   // --- Fib + regime ---
-  const fibSwing = findFibSwing(slice, patterns);
+  const fibSwing = findFibSwing(slice, patterns, trend);
   const fibLevels = calculateFibLevels(fibSwing);
   let fibPocket = null;
   if (fibLevels.length) {
