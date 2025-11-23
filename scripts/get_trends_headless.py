@@ -1,8 +1,8 @@
 import os
 import time
 import json
-import glob
 import random
+from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -16,15 +16,13 @@ KEYWORD = "bitcoin"
 GEO = "US"
 TIMEFRAME = "today 12-m" 
 OUTPUT_JSON = "public/btc_google_trends.json" 
-DOWNLOAD_DIR = os.path.join(os.getcwd(), "temp_downloads")
 
-if not os.path.exists(DOWNLOAD_DIR):
-    os.makedirs(DOWNLOAD_DIR)
+# Ensure directories
 if not os.path.exists("public"):
     os.makedirs("public")
 
 def scrape_trends():
-    print(f"🚀 Starting STEALTH scraper for '{KEYWORD}'...")
+    print(f"🚀 Starting DIRECT-DOM scraper for '{KEYWORD}'...")
 
     chrome_options = Options()
     chrome_options.add_argument("--headless=new") 
@@ -33,12 +31,7 @@ def scrape_trends():
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
     
-    prefs = {
-        "download.default_directory": DOWNLOAD_DIR,
-        "download.prompt_for_download": False,
-        "directory_upgrade": True
-    }
-    chrome_options.add_experimental_option("prefs", prefs)
+    # Hide automation flags
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
 
@@ -52,6 +45,7 @@ def scrape_trends():
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=chrome_options)
 
+        # Apply Stealth
         stealth(driver,
             languages=["en-US", "en"],
             vendor="Google Inc.",
@@ -61,104 +55,85 @@ def scrape_trends():
             fix_hairline=True,
         )
 
+        # Navigate
         url = f"https://trends.google.com/trends/explore?date={TIMEFRAME.replace(' ', '%20')}&geo={GEO}&q={KEYWORD}"
         print(f"🔗 Navigating to: {url}")
-        
-        time.sleep(random.uniform(1, 3))
         driver.get(url)
-
-        if "Error" in driver.title or "429" in driver.page_source:
-            print("⚠️ Blocked. Retrying via Homepage...")
-            driver.delete_all_cookies()
-            time.sleep(3)
-            driver.get("https://trends.google.com/trends/")
-            time.sleep(3)
-            driver.get(url)
-            
+        
+        # Wait for load
         wait = WebDriverWait(driver, 15)
         
+        # Check for 429
+        if "Error" in driver.title or "429" in driver.page_source:
+            print("⚠️ Page error detected. Retrying via home...")
+            time.sleep(2)
+            driver.get("https://trends.google.com/trends/")
+            time.sleep(2)
+            driver.get(url)
+
+        # Handle Cookies
         try:
             cookie_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.cookieBarConsentButton")))
             cookie_btn.click()
-            print("🍪 Cookie banner clicked")
-            time.sleep(2)
+            print("🍪 Cookies accepted")
         except:
             pass
 
-        print("⏳ Waiting for chart to render...")
+        print("⏳ Waiting for chart data...")
+        
+        # Wait for the Line Chart to appear
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "line-chart-directive")))
-
-        # --- PRECISION BUTTON TARGETING ---
-        # The Share button is usually first. The Download button is usually second or has a specific icon.
-        # We look for the button containing the "file_download" icon text OR the export title.
-        button_selectors = [
-            "//button[@title='CSV']",  # Most specific
-            "//button[.//i[text()='file_download']]", # Icon specific
-            "//button[contains(@class,'widget-actions-item')][2]" # 2nd button (Download) usually follows Share
-        ]
-
-        btn = None
-        for selector in button_selectors:
-            try:
-                print(f"🔎 Hunting for Download button: {selector}")
-                candidates = driver.find_elements(By.XPATH, selector)
-                for candidate in candidates:
-                    if candidate.is_displayed() and candidate.is_enabled():
-                        btn = candidate
-                        print("✅ Download Button LOCKED.")
-                        break
-                if btn: break
-            except:
-                continue
         
-        if not btn:
-            raise Exception("Could not find a valid Download button (Share button avoidance active)")
+        # --- THE HACK: SCRAPE HIDDEN TABLE ---
+        # Google renders an accessible table inside the SVG container for screen readers
+        # We simply read this table instead of downloading a CSV.
+        
+        # Locate the table rows inside the chart
+        rows = driver.find_elements(By.CSS_SELECTOR, "line-chart-directive table tbody tr")
+        
+        if not rows:
+            raise Exception("Chart loaded but data table is missing!")
 
-        # Click logic
-        print("⬇️ Clicking download...")
-        driver.execute_script("arguments[0].click();", btn)
+        print(f"✅ Found {len(rows)} data points in DOM table")
         
-        # Wait for download
-        time.sleep(10)
-        
-        files = glob.glob(os.path.join(DOWNLOAD_DIR, "*.csv"))
-        if not files:
-            raise Exception("No CSV found in directory after click")
-        
-        csv_path = files[0]
-        print(f"✅ CSV Downloaded: {csv_path}")
-
-        # Convert
-        print("🔄 Converting to JSON...")
         json_output = []
         
-        with open(csv_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            
-        for line in lines:
-            parts = line.strip().split(',')
-            if len(parts) >= 2:
-                date_str = parts[0]
-                if len(date_str) == 10 and date_str.count('-') == 2:
-                    try:
-                        val = float(parts[1])
-                        json_output.append({
-                            "date": date_str,
-                            "bitcoin": val
-                        })
-                    except ValueError:
-                        continue
+        for row in rows:
+            cols = row.find_elements(By.TAG_NAME, "td")
+            if len(cols) >= 2:
+                date_text = cols[0].text.strip() # e.g. "Nov 17, 2024"
+                val_text = cols[1].text.strip()  # e.g. "100"
+                
+                try:
+                    # Convert Date "Nov 17, 2024" -> "2024-11-17"
+                    # Note: Google Trends date format might vary by locale (we forced en-US in stealth)
+                    # Remove any LTR marks if present
+                    clean_date = date_text.replace('\u202a', '').replace('\u202c', '')
+                    
+                    dt = datetime.strptime(clean_date, "%b %d, %Y")
+                    date_str = dt.strftime("%Y-%m-%d")
+                    
+                    val = float(val_text)
+                    
+                    json_output.append({
+                        "date": date_str,
+                        "bitcoin": val
+                    })
+                except Exception as e:
+                    # print(f"Skipping row: {date_text} - {e}")
+                    continue
 
         if not json_output:
-            raise Exception("CSV parsed but empty!")
+            raise Exception("Failed to parse any rows from the table")
 
+        # Save
         with open(OUTPUT_JSON, 'w') as f:
             json.dump(json_output, f, indent=2)
             
-        print(f"🎉 Success! Saved {len(json_output)} records.")
+        print(f"🎉 Success! Extracted {len(json_output)} records directly from page.")
 
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print(f"❌ CRITICAL ERROR: {e}")
         if driver:
             timestamp = int(time.time())
             driver.save_screenshot(f"debug_screenshot_{timestamp}.png")
