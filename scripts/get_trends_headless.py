@@ -15,14 +15,15 @@ from selenium_stealth import stealth
 # --- CONFIGURATION ---
 KEYWORD = "bitcoin"
 GEO = "US"
-TIMEFRAME = "today 12-m" 
+# CHANGED: Fetch 5 years to cover 2022/2023 data
+TIMEFRAME = "today 5-y" 
 OUTPUT_JSON = "public/btc_google_trends.json" 
 
 if not os.path.exists("public"):
     os.makedirs("public")
 
 def parse_google_date(date_text):
-    # Normalize string: remove invisible chars, non-breaking spaces
+    # Normalize string
     clean_text = date_text.replace('\u202a', '').replace('\u202c', '').replace('\xa0', ' ').strip()
     
     # PATTERN 1: Simple Date "Nov 17, 2024"
@@ -31,23 +32,19 @@ def parse_google_date(date_text):
     except:
         pass
 
-    # PATTERN 2: Date Range "Nov 17 – 23, 2024" or "Nov 17, 2024 – Nov 23, 2024"
-    # Strategy: Grab the year from the end, and the Month/Day from the start.
+    # PATTERN 2: Date Range "Nov 17 – 23, 2024"
     try:
-        # Extract the year (last 4 digits)
+        # Extract year (last 4 digits)
         year_match = re.search(r'(\d{4})$', clean_text)
         if not year_match:
             return None
         year = year_match.group(1)
 
-        # Extract the first Month and Day (e.g. "Nov 17")
-        # Matches "Nov 17" or "Nov. 17"
+        # Extract the first Month and Day
         start_date_match = re.match(r'([A-Za-z]+)\.?\s+(\d+)', clean_text)
         if start_date_match:
             month_str = start_date_match.group(1)
             day_str = start_date_match.group(2)
-            
-            # Construct a full date string "Nov 17 2024"
             full_date_str = f"{month_str} {day_str} {year}"
             return datetime.strptime(full_date_str, "%b %d %Y")
     except:
@@ -56,7 +53,7 @@ def parse_google_date(date_text):
     return None
 
 def scrape_trends():
-    print(f"🚀 Starting ROBUST scraper for '{KEYWORD}'...")
+    print(f"🚀 Starting 5-YEAR scraper for '{KEYWORD}'...")
 
     chrome_options = Options()
     chrome_options.add_argument("--headless=new") 
@@ -64,7 +61,7 @@ def scrape_trends():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
     
-    prefs = {"profile.managed_default_content_settings.images": 2} # Disable images for speed
+    prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
@@ -94,7 +91,7 @@ def scrape_trends():
         
         wait = WebDriverWait(driver, 15)
         
-        # Anti-detection / Error check
+        # 429 Check
         if "Error" in driver.title or "429" in driver.page_source:
             print("⚠️ 429 detected. Pausing and retrying...")
             time.sleep(5)
@@ -104,23 +101,22 @@ def scrape_trends():
         try:
             cookie_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.cookieBarConsentButton")))
             cookie_btn.click()
+            print("🍪 Cookies accepted")
         except:
             pass
 
-        print("⏳ Waiting for data table...")
-        # Wait for the line chart directive
+        print("⏳ Waiting for chart data...")
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "line-chart-directive")))
         
-        # Locate Rows
+        # Grab rows from the hidden table
         rows = driver.find_elements(By.CSS_SELECTOR, "line-chart-directive table tbody tr")
         
         if not rows:
-            # Debug dump if table missing
-            print("❌ Chart loaded but table not found in DOM.")
-            print(f"Page source preview: {driver.page_source[:500]}")
+            print("❌ Table not found in DOM.")
+            print(f"Page source: {driver.page_source[:500]}")
             raise Exception("Table missing")
 
-        print(f"✅ Found {len(rows)} rows. Parsing...")
+        print(f"✅ Found {len(rows)} weekly data points")
         
         json_output = []
         parse_errors = 0
@@ -128,50 +124,41 @@ def scrape_trends():
         for i, row in enumerate(rows):
             cols = row.find_elements(By.TAG_NAME, "td")
             if len(cols) >= 2:
-                # Use get_attribute("textContent") for better hidden text retrieval
                 date_text = cols[0].get_attribute("textContent").strip()
                 val_text = cols[1].get_attribute("textContent").strip()
                 
-                # DEBUG: Print first row to see format
                 if i == 0:
-                    print(f"🔎 SAMPLE ROW DATA: Date='{date_text}' Value='{val_text}'")
+                    print(f"🔎 SAMPLE ROW: '{date_text}' = '{val_text}'")
 
                 dt = parse_google_date(date_text)
                 
                 if dt:
                     try:
-                        # Handle "<1" values by treating as 0 or 0.5
-                        if "<" in val_text:
-                            val = 0.5
-                        else:
-                            val = float(val_text)
+                        if "<" in val_text: val = 0.5
+                        else: val = float(val_text)
                             
                         json_output.append({
                             "date": dt.strftime("%Y-%m-%d"),
                             "bitcoin": val
                         })
                     except ValueError:
-                        print(f"⚠️ Could not parse value: {val_text}")
                         parse_errors += 1
                 else:
-                    print(f"⚠️ Could not parse date: '{date_text}'")
                     parse_errors += 1
 
         if not json_output:
-            raise Exception(f"Failed to parse any rows. Errors: {parse_errors}")
+            raise Exception(f"Failed to parse rows. Errors: {parse_errors}")
 
         with open(OUTPUT_JSON, 'w') as f:
             json.dump(json_output, f, indent=2)
             
-        print(f"🎉 Success! Parsed {len(json_output)} records.")
+        print(f"🎉 Success! Saved {len(json_output)} records (2020-Present).")
 
     except Exception as e:
-        print(f"❌ CRITICAL ERROR: {e}")
+        print(f"❌ ERROR: {e}")
         if driver:
             timestamp = int(time.time())
             driver.save_screenshot(f"debug_screenshot_{timestamp}.png")
-            with open(f"debug_page_{timestamp}.html", "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
         exit(1)
 
     finally:
