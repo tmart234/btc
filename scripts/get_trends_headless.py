@@ -9,7 +9,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.action_chains import ActionChains
 from selenium_stealth import stealth
 
 # --- CONFIGURATION ---
@@ -68,7 +67,6 @@ def scrape_trends():
         time.sleep(random.uniform(1, 3))
         driver.get(url)
 
-        # Check for blocks
         if "Error" in driver.title or "429" in driver.page_source:
             print("⚠️ Blocked. Retrying via Homepage...")
             driver.delete_all_cookies()
@@ -79,7 +77,6 @@ def scrape_trends():
             
         wait = WebDriverWait(driver, 15)
         
-        # Cookie Banner
         try:
             cookie_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.cookieBarConsentButton")))
             cookie_btn.click()
@@ -89,42 +86,37 @@ def scrape_trends():
             pass
 
         print("⏳ Waiting for chart to render...")
-        # Wait specifically for the timeline chart to appear
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "line-chart-directive")))
 
-        # --- ROBUST BUTTON FINDER ---
-        # Google changes these IDs often. We try 4 different strategies.
+        # --- PRECISION BUTTON TARGETING ---
+        # The Share button is usually first. The Download button is usually second or has a specific icon.
+        # We look for the button containing the "file_download" icon text OR the export title.
         button_selectors = [
-            "//button[.//i[text()='file_download']]",   # Strategy 1: Icon Text
-            "//button[@aria-label='Export']",           # Strategy 2: Accessibility Label
-            "//button[@title='CSV']",                   # Strategy 3: Title Attribute
-            "(//div[contains(@class, 'widget-actions')]//button)[1]" # Strategy 4: Structure (First button in actions)
+            "//button[@title='CSV']",  # Most specific
+            "//button[.//i[text()='file_download']]", # Icon specific
+            "//button[contains(@class,'widget-actions-item')][2]" # 2nd button (Download) usually follows Share
         ]
 
         btn = None
         for selector in button_selectors:
             try:
-                print(f"🔎 Trying selector: {selector}")
-                candidate = driver.find_element(By.XPATH, selector)
-                if candidate.is_displayed():
-                    btn = candidate
-                    print("✅ Button found!")
-                    break
+                print(f"🔎 Hunting for Download button: {selector}")
+                candidates = driver.find_elements(By.XPATH, selector)
+                for candidate in candidates:
+                    if candidate.is_displayed() and candidate.is_enabled():
+                        btn = candidate
+                        print("✅ Download Button LOCKED.")
+                        break
+                if btn: break
             except:
                 continue
         
         if not btn:
-            # Last ditch: try to find ANY button in the first widget header
-            print("⚠️ Specific selectors failed. Hunting for generic action button...")
-            btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div.widget-actions-item button")))
+            raise Exception("Could not find a valid Download button (Share button avoidance active)")
 
         # Click logic
         print("⬇️ Clicking download...")
-        try:
-            btn.click()
-        except:
-            # If standard click fails, use JS click (bypass overlays)
-            driver.execute_script("arguments[0].click();", btn)
+        driver.execute_script("arguments[0].click();", btn)
         
         # Wait for download
         time.sleep(10)
