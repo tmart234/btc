@@ -1,0 +1,41 @@
+name: Daily Trends Scraper
+
+on:
+  schedule:
+    # Run at 8:00 AM UTC daily
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Install Dependencies
+        run: |
+          pip install selenium webdriver-manager
+
+      - name: Run Scraper Script
+        run: python get_trends_headless.py
+
+      - name: Commit and Push Data
+        run: |
+          git config --global user.name "Trends Bot"
+          git config --global user.email "bot@github.com"
+          # Note the new filename here
+          git add public/btc_google_trends.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update trends data [skip ci]" && git push)
