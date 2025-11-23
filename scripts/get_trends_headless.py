@@ -2,6 +2,7 @@ import os
 import time
 import json
 import random
+import re
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -17,21 +18,54 @@ GEO = "US"
 TIMEFRAME = "today 12-m" 
 OUTPUT_JSON = "public/btc_google_trends.json" 
 
-# Ensure directories
 if not os.path.exists("public"):
     os.makedirs("public")
 
+def parse_google_date(date_text):
+    # Normalize string: remove invisible chars, non-breaking spaces
+    clean_text = date_text.replace('\u202a', '').replace('\u202c', '').replace('\xa0', ' ').strip()
+    
+    # PATTERN 1: Simple Date "Nov 17, 2024"
+    try:
+        return datetime.strptime(clean_text, "%b %d, %Y")
+    except:
+        pass
+
+    # PATTERN 2: Date Range "Nov 17 – 23, 2024" or "Nov 17, 2024 – Nov 23, 2024"
+    # Strategy: Grab the year from the end, and the Month/Day from the start.
+    try:
+        # Extract the year (last 4 digits)
+        year_match = re.search(r'(\d{4})$', clean_text)
+        if not year_match:
+            return None
+        year = year_match.group(1)
+
+        # Extract the first Month and Day (e.g. "Nov 17")
+        # Matches "Nov 17" or "Nov. 17"
+        start_date_match = re.match(r'([A-Za-z]+)\.?\s+(\d+)', clean_text)
+        if start_date_match:
+            month_str = start_date_match.group(1)
+            day_str = start_date_match.group(2)
+            
+            # Construct a full date string "Nov 17 2024"
+            full_date_str = f"{month_str} {day_str} {year}"
+            return datetime.strptime(full_date_str, "%b %d %Y")
+    except:
+        pass
+        
+    return None
+
 def scrape_trends():
-    print(f"🚀 Starting DIRECT-DOM scraper for '{KEYWORD}'...")
+    print(f"🚀 Starting ROBUST scraper for '{KEYWORD}'...")
 
     chrome_options = Options()
     chrome_options.add_argument("--headless=new") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
     
-    # Hide automation flags
+    prefs = {"profile.managed_default_content_settings.images": 2} # Disable images for speed
+    chrome_options.add_experimental_option("prefs", prefs)
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
 
@@ -45,7 +79,6 @@ def scrape_trends():
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=chrome_options)
 
-        # Apply Stealth
         stealth(driver,
             languages=["en-US", "en"],
             vendor="Google Inc.",
@@ -55,82 +88,82 @@ def scrape_trends():
             fix_hairline=True,
         )
 
-        # Navigate
         url = f"https://trends.google.com/trends/explore?date={TIMEFRAME.replace(' ', '%20')}&geo={GEO}&q={KEYWORD}"
         print(f"🔗 Navigating to: {url}")
         driver.get(url)
         
-        # Wait for load
         wait = WebDriverWait(driver, 15)
         
-        # Check for 429
+        # Anti-detection / Error check
         if "Error" in driver.title or "429" in driver.page_source:
-            print("⚠️ Page error detected. Retrying via home...")
-            time.sleep(2)
-            driver.get("https://trends.google.com/trends/")
-            time.sleep(2)
+            print("⚠️ 429 detected. Pausing and retrying...")
+            time.sleep(5)
             driver.get(url)
 
-        # Handle Cookies
+        # Cookie Banner
         try:
             cookie_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.cookieBarConsentButton")))
             cookie_btn.click()
-            print("🍪 Cookies accepted")
         except:
             pass
 
-        print("⏳ Waiting for chart data...")
-        
-        # Wait for the Line Chart to appear
+        print("⏳ Waiting for data table...")
+        # Wait for the line chart directive
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "line-chart-directive")))
         
-        # --- THE HACK: SCRAPE HIDDEN TABLE ---
-        # Google renders an accessible table inside the SVG container for screen readers
-        # We simply read this table instead of downloading a CSV.
-        
-        # Locate the table rows inside the chart
+        # Locate Rows
         rows = driver.find_elements(By.CSS_SELECTOR, "line-chart-directive table tbody tr")
         
         if not rows:
-            raise Exception("Chart loaded but data table is missing!")
+            # Debug dump if table missing
+            print("❌ Chart loaded but table not found in DOM.")
+            print(f"Page source preview: {driver.page_source[:500]}")
+            raise Exception("Table missing")
 
-        print(f"✅ Found {len(rows)} data points in DOM table")
+        print(f"✅ Found {len(rows)} rows. Parsing...")
         
         json_output = []
+        parse_errors = 0
         
-        for row in rows:
+        for i, row in enumerate(rows):
             cols = row.find_elements(By.TAG_NAME, "td")
             if len(cols) >= 2:
-                date_text = cols[0].text.strip() # e.g. "Nov 17, 2024"
-                val_text = cols[1].text.strip()  # e.g. "100"
+                # Use get_attribute("textContent") for better hidden text retrieval
+                date_text = cols[0].get_attribute("textContent").strip()
+                val_text = cols[1].get_attribute("textContent").strip()
                 
-                try:
-                    # Convert Date "Nov 17, 2024" -> "2024-11-17"
-                    # Note: Google Trends date format might vary by locale (we forced en-US in stealth)
-                    # Remove any LTR marks if present
-                    clean_date = date_text.replace('\u202a', '').replace('\u202c', '')
-                    
-                    dt = datetime.strptime(clean_date, "%b %d, %Y")
-                    date_str = dt.strftime("%Y-%m-%d")
-                    
-                    val = float(val_text)
-                    
-                    json_output.append({
-                        "date": date_str,
-                        "bitcoin": val
-                    })
-                except Exception as e:
-                    # print(f"Skipping row: {date_text} - {e}")
-                    continue
+                # DEBUG: Print first row to see format
+                if i == 0:
+                    print(f"🔎 SAMPLE ROW DATA: Date='{date_text}' Value='{val_text}'")
+
+                dt = parse_google_date(date_text)
+                
+                if dt:
+                    try:
+                        # Handle "<1" values by treating as 0 or 0.5
+                        if "<" in val_text:
+                            val = 0.5
+                        else:
+                            val = float(val_text)
+                            
+                        json_output.append({
+                            "date": dt.strftime("%Y-%m-%d"),
+                            "bitcoin": val
+                        })
+                    except ValueError:
+                        print(f"⚠️ Could not parse value: {val_text}")
+                        parse_errors += 1
+                else:
+                    print(f"⚠️ Could not parse date: '{date_text}'")
+                    parse_errors += 1
 
         if not json_output:
-            raise Exception("Failed to parse any rows from the table")
+            raise Exception(f"Failed to parse any rows. Errors: {parse_errors}")
 
-        # Save
         with open(OUTPUT_JSON, 'w') as f:
             json.dump(json_output, f, indent=2)
             
-        print(f"🎉 Success! Extracted {len(json_output)} records directly from page.")
+        print(f"🎉 Success! Parsed {len(json_output)} records.")
 
     except Exception as e:
         print(f"❌ CRITICAL ERROR: {e}")
