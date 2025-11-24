@@ -219,7 +219,7 @@ async function fetchFundingHistory() {
 async function fetchGoogleTrendsHistory() {
   const history = {};
   try {
-    const res = await fetch('./public/btc_google_trends.json?t=' + Date.now());
+    const res = await fetch('./btc_google_trends.json?t=' + Date.now());
     
     if (!res.ok) {
       console.warn('[GT] trends JSON not found / status', res.status);
