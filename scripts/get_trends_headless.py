@@ -1,7 +1,6 @@
 import os
 import time
 import json
-import random
 import re
 from datetime import datetime
 from selenium import webdriver

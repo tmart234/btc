@@ -435,14 +435,8 @@ const fetchMarketData = async () => {
     // 1) Try direct (CryptoCompare usually allows CORS)
     try {
       const res = await fetch(priceUrl);
-      console.log('[fetchMarketData] direct histoday status', res.status);
       if (res.ok) {
         const json = await res.json();
-        console.log(
-          '[fetchMarketData] direct histoday payload',
-          json.Response,
-          json.Message
-        );
         if (json.Response === 'Success' && Array.isArray(json.Data?.Data)) {
           priceData = json.Data.Data;
         }
@@ -454,11 +448,6 @@ const fetchMarketData = async () => {
     // 2) Fall back to proxies if direct failed
     if (!priceData) {
       const json = await fetchJson(priceUrl);
-      console.log(
-        '[fetchMarketData] proxy histoday payload',
-        json && json.Response,
-        json && json.Message
-      );
       if (json && json.Response === 'Success' && Array.isArray(json.Data?.Data)) {
         priceData = json.Data.Data;
       }
@@ -481,12 +470,15 @@ const fetchMarketData = async () => {
       fetchLongShortHistory(),
       fetchOpenInterestHistory(),
       fetchFearGreedHistory(),
-      fetchGoogleTrendsHistory(), // NEW
+      fetchGoogleTrendsHistory(),
     ]);
 
     const cleanData = [];
     const compositeRaw = []; // GT composite raw series
     const fngVals = [];      // Fear & Greed raw series
+
+    // --- NEW: Variables to hold last known GT values for forward-filling ---
+    let lastGt = { bitcoin: null, buy: null, crash: null };
 
     priceData.forEach((d, i) => {
       if (Number.isFinite(d.close) && Number.isFinite(d.volumeto) && d.close > 0) {
@@ -520,14 +512,23 @@ const fetchMarketData = async () => {
         const fearGreed = Number.isFinite(fng.fearGreed) ? fng.fearGreed : null;
         const fearGreedClass = fng.fearGreedClass || null;
 
-        // Google Trends for this day (if present)
-        const gt = gtHistory[dateStr] || {};
-        const gtBitcoin = Number.isFinite(gt.bitcoin) ? gt.bitcoin : null;
-        const gtBuy = Number.isFinite(gt.buyBitcoin) ? gt.buyBitcoin : null;
-        const gtCrash = Number.isFinite(gt.bitcoinCrash) ? gt.bitcoinCrash : null;
+        // --- UPDATED: Google Trends Logic (Forward Fill) ---
+        // If we have exact data for this day, update our "last known" values
+        const gtExact = gtHistory[dateStr];
+        if (gtExact) {
+          if (Number.isFinite(gtExact.bitcoin)) lastGt.bitcoin = gtExact.bitcoin;
+          if (Number.isFinite(gtExact.buyBitcoin)) lastGt.buy = gtExact.buyBitcoin;
+          if (Number.isFinite(gtExact.bitcoinCrash)) lastGt.crash = gtExact.bitcoinCrash;
+        }
+
+        // Use last known values if current day is missing (Forward Fill)
+        const gtBitcoin = lastGt.bitcoin;
+        const gtBuy = lastGt.buy;
+        const gtCrash = lastGt.crash;
 
         // Build composite raw: 0.5 * buy - 0.3 * crash + 0.2 * bitcoin
         let compositeVal = null;
+        // Only calculate if we have at least one valid metric
         if (gtBitcoin != null || gtBuy != null || gtCrash != null) {
           const b = gtBitcoin ?? 0;
           const buy = gtBuy ?? 0;
@@ -559,7 +560,7 @@ const fetchMarketData = async () => {
           fearGreed,
           fearGreedClass,
 
-          // raw GT fields (optional / informational)
+          // raw GT fields
           gtBitcoin,
           gtBuy,
           gtCrash,
@@ -587,20 +588,14 @@ const fetchMarketData = async () => {
       });
     }
 
-    // --- Light forward-fill + ΔOI (unchanged) ---
+    // --- Light forward-fill for other metrics + ΔOI ---
     for (let i = 1; i < cleanData.length; i++) {
       const cur = cleanData[i];
       const prev = cleanData[i - 1];
 
-      if (cur.fundingRate == null) {
-        cur.fundingRate = prev.fundingRate;
-      }
-      if (cur.globalLsRatio == null) {
-        cur.globalLsRatio = prev.globalLsRatio;
-      }
-      if (cur.topLsRatio == null) {
-        cur.topLsRatio = prev.topLsRatio;
-      }
+      if (cur.fundingRate == null) cur.fundingRate = prev.fundingRate;
+      if (cur.globalLsRatio == null) cur.globalLsRatio = prev.globalLsRatio;
+      if (cur.topLsRatio == null) cur.topLsRatio = prev.topLsRatio;
 
       if (
         Number.isFinite(cur.openInterest) &&
@@ -621,7 +616,6 @@ const fetchMarketData = async () => {
       cleanData[0].oiChangePct = 0;
     }
 
-    console.log('[fetchMarketData] final bars', cleanData.length);
     return cleanData;
   } catch (err) {
     console.error('[fetchMarketData] unexpected error', err);
@@ -2512,6 +2506,7 @@ const App = () => {
                     dot={false}
                     strokeOpacity={0.8}
                     name="GT Composite Z"
+                    connectNulls={true}
                   />
                 </ComposedChart>
               </ResponsiveContainer>
