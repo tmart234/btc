@@ -1,5 +1,14 @@
 // Use the globals provided by the UMD scripts you loaded in index.html
-const { useState, useEffect } = window.React;
+const React = window.React;
+const ReactDOM = window.ReactDOM;
+
+if (!React || !ReactDOM) {
+  throw new Error(
+    "Missing React/ReactDOM globals. Ensure the React UMD scripts load before app.js."
+  );
+}
+
+const { useState, useEffect } = React;
 
 // Safely pull components off window.Recharts (with fallbacks)
 let Line, LineChart, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -29,7 +38,14 @@ if (window.Recharts) {
 
   // Fallback stub components so React doesn't crash
   const Stub = ({ children }) => (
-    <div className="p-2 text-xs text-red-500 border border-dashed border-red-400">
+    <div
+      style={{
+        padding: 8,
+        fontSize: 12,
+        color: '#f87171',
+        border: '1px dashed #f87171',
+      }}
+    >
       Recharts failed to load. Charts disabled.
       {children}
     </div>
@@ -39,7 +55,7 @@ if (window.Recharts) {
       ComposedChart = Bar = BarChart = Label = Cell = Stub;
 }
 
-const Icon = ({ children, className = '', ...rest }) => (
+const Icon = ({ children, className = '' }) => (
   <span
     className={className}
     style={{
@@ -47,7 +63,6 @@ const Icon = ({ children, className = '', ...rest }) => (
       alignItems: 'center',
       justifyContent: 'center',
     }}
-    {...rest}
   >
     {children}
   </span>
@@ -342,14 +357,14 @@ async function fetchOpenInterestHistory() {
         : [];
 
     arr.forEach(d => {
-      const t = d.timestamp || d.time;
+      const t = Number(d.timestamp ?? d.time);
       const oiRaw =
         d.sumOpenInterest ??
         d.openInterest ??
         d.sumOpenInterestValue;
 
-      const oi = parseFloat(oiRaw);
-      if (!t || !Number.isFinite(oi)) return;
+      const oi = Number(oiRaw);
+      if (!Number.isFinite(t) || !Number.isFinite(oi)) return;
 
       const dateStr = new Date(Number(t)).toISOString().split('T')[0];
       const oiValRaw = d.sumOpenInterestValue;
@@ -1020,21 +1035,99 @@ const findPatterns = (data, windowSize) => {
     return l.low <= prev.low && l.low <= next.low;
   });
 
+  // --- Robust multi-pivot lines (weighted regression + outlier filter) ---
+  const atrSeries = calculateATRSeries(data, 14);
+  const lastAtr = atrSeries[atrSeries.length - 1] || (data[len - 1]?.close * 0.01) || 0;
+  const baseTolerance = Math.max(lastAtr, (data[len - 1]?.close || 0) * 0.005);
+  const breakTolerance = baseTolerance * 1.5;
+  const maxSlopePerBar = baseTolerance * 3; // avoid absurdly steep lines
+
+  const weightedRegression = (pts, priceKey) => {
+    let sumW = 0, sumWX = 0, sumWY = 0, sumWXX = 0, sumWXY = 0;
+    pts.forEach(p => {
+      const w = 1 + (p.localIndex / len); // favor recent pivots slightly
+      const x = p.localIndex;
+      const y = p[priceKey];
+      sumW += w;
+      sumWX += w * x;
+      sumWY += w * y;
+      sumWXX += w * x * x;
+      sumWXY += w * x * y;
+    });
+    const denom = (sumW * sumWXX) - (sumWX * sumWX);
+    if (!Number.isFinite(denom) || Math.abs(denom) < 1e-9) return null;
+    const slope = (sumW * sumWXY - sumWX * sumWY) / denom;
+    const intercept = (sumWY - slope * sumWX) / sumW;
+    return { slope, intercept };
+  };
+
+  const buildRobustLine = (pivots, priceKey) => {
+    if (pivots.length < 3) return null;
+    const sample = pivots.slice(-6); // last few pivots only
+    let fit = weightedRegression(sample, priceKey);
+    if (!fit) return null;
+
+    const residuals = sample.map(p => {
+      const pred = fit.slope * p.localIndex + fit.intercept;
+      return (p[priceKey] || 0) - pred;
+    });
+    const rms = Math.sqrt(residuals.reduce((s, r) => s + r * r, 0) / residuals.length);
+    const maxDist = Math.max(baseTolerance, rms * 1.5);
+    const filtered = sample.filter((p, idx) => Math.abs(residuals[idx]) <= maxDist);
+    if (filtered.length < 3) return null; // require >=3 touches
+
+    fit = weightedRegression(filtered, priceKey);
+    if (!fit) return null;
+
+    let slope = fit.slope;
+    if (Math.abs(slope) > maxSlopePerBar) slope = Math.sign(slope) * maxSlopePerBar;
+
+    const anchor = filtered[0];
+    const anchorBase = fit.intercept + slope * anchor.localIndex;
+    const last = filtered[filtered.length - 1];
+
+    return {
+      p1: { ...anchor, base: anchorBase },
+      p2: last,
+      slope,
+      intercept: fit.intercept,
+      touches: filtered.length
+    };
+  };
+
+  const validateLine = (line, priceKey, type) => {
+    if (!line || line.touches < 3) return null;
+    const lastIdx = len - 1;
+    const lastClose = data[lastIdx]?.close;
+    if (!Number.isFinite(lastClose)) return null;
+
+    const anchorVal = line.p1.base ?? line.p1[priceKey];
+    const projected = anchorVal + line.slope * (lastIdx - line.p1.localIndex);
+
+    if (type === 'res' && lastClose > projected + breakTolerance) return null;
+    if (type === 'sup' && lastClose < projected - breakTolerance) return null;
+    return line;
+  };
+
   const slopeTolerance = 5000;
-  if (majorHighs.length >= 2) {
+  // Prefer robust multi-pivot lines; fall back to simple 2-point lines if needed.
+  resLine = validateLine(buildRobustLine(majorHighs, 'high'), 'high', 'res');
+  supLine = validateLine(buildRobustLine(majorLows, 'low'), 'low', 'sup');
+
+  if (!resLine && majorHighs.length >= 2) {
     const p2 = majorHighs[majorHighs.length - 1];
     const p1 = majorHighs[majorHighs.length - 2];
     if (p2.localIndex !== p1.localIndex) {
       const slope = (p2.high - p1.high) / (p2.localIndex - p1.localIndex);
-      if (Math.abs(slope) < slopeTolerance) resLine = { p1, p2, slope };
+      if (Math.abs(slope) < slopeTolerance) resLine = { p1: { ...p1, base: p1.high }, p2, slope, touches: 2 };
     }
   }
-  if (majorLows.length >= 2) {
+  if (!supLine && majorLows.length >= 2) {
     const p2 = majorLows[majorLows.length - 1];
     const p1 = majorLows[majorLows.length - 2];
     if (p2.localIndex !== p1.localIndex) {
       const slope = (p2.low - p1.low) / (p2.localIndex - p1.localIndex);
-      if (Math.abs(slope) < slopeTolerance) supLine = { p1, p2, slope };
+      if (Math.abs(slope) < slopeTolerance) supLine = { p1: { ...p1, base: p1.low }, p2, slope, touches: 2 };
     }
   }
 
@@ -1195,7 +1288,8 @@ const calculateTradeSetups = (
   let formationSup = null;
   if (trendLines && trendLines.supLine) {
     const idx = data.length - 1;
-    formationSup = trendLines.supLine.p1.low +
+    const anchor = trendLines.supLine.p1.base ?? trendLines.supLine.p1.low;
+    formationSup = anchor +
       trendLines.supLine.slope * (idx - trendLines.supLine.p1.localIndex);
   }
 
@@ -1558,13 +1652,15 @@ const analyzeData = (data, config, derivatives, fundingRealTime, timeframeName) 
     let supY = null;
 
     if (patterns.resLine && i >= patterns.resLine.p1.localIndex) {
+      const anchor = patterns.resLine.p1.base ?? patterns.resLine.p1.high;
       resY =
-        patterns.resLine.p1.high +
+        anchor +
         patterns.resLine.slope * (i - patterns.resLine.p1.localIndex);
     }
     if (patterns.supLine && i >= patterns.supLine.p1.localIndex) {
+      const anchor = patterns.supLine.p1.base ?? patterns.supLine.p1.low;
       supY =
-        patterns.supLine.p1.low +
+        anchor +
         patterns.supLine.slope * (i - patterns.supLine.p1.localIndex);
     }
 
