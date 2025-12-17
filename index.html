@@ -2,45 +2,97 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bitcoin AI Analyst</title>
 
-    <!-- Tailwind CDN (fine for local / prototype use) -->
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Custom styles -->
+    <style>
+      /* Smooth scrolling */
+      html { scroll-behavior: smooth; }
+      
+      /* Custom scrollbar */
+      ::-webkit-scrollbar { width: 6px; height: 6px; }
+      ::-webkit-scrollbar-track { background: #f1f5f9; }
+      ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+      ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+      
+      /* Loading animation */
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .animate-spin { animation: spin 1s linear infinite; }
+      
+      /* Chart hover effects */
+      .recharts-surface { transition: opacity 0.15s ease; }
+    </style>
 
-    <!-- React & ReactDOM UMD (React 18) -->
+    <!-- React 18 UMD -->
     <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
 
-    <!-- ReactIs MUST match React's major version -->
+    <!-- ReactIs (required by Recharts) -->
     <script src="https://cdn.jsdelivr.net/npm/react-is@18/umd/react-is.production.min.js"></script>
 
-    <!-- (Optional but harmless) PropTypes global -->
+    <!-- PropTypes (optional but harmless) -->
     <script src="https://unpkg.com/prop-types/prop-types.min.js"></script>
 
-    <!-- ✅ Recharts UMD build via jsDelivr (2.12.7 has /umd/Recharts.min.js) -->
+    <!-- Recharts 2.12.7 UMD -->
     <script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.min.js"></script>
 
-    <!-- Quick sanity check: you can remove this once it works -->
-    <script>
-      console.log("React global:", window.React);
-      console.log("ReactDOM global:", window.ReactDOM);
-      console.log("ReactIs global:", window.ReactIs || "MISSING");
-      console.log("PropTypes global:", window.PropTypes || "MISSING");
-      console.log("Recharts global (before btc.jsx):", window.Recharts || "MISSING");
-    </script>
-
-    <!-- Babel to compile btc.jsx in the browser -->
+    <!-- Babel for JSX compilation -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Debug: Check globals loaded -->
+    <script>
+      console.log("🔍 Checking globals...");
+      console.log("  React:", window.React ? "✅" : "❌");
+      console.log("  ReactDOM:", window.ReactDOM ? "✅" : "❌");
+      console.log("  ReactIs:", window.ReactIs ? "✅" : "❌");
+      console.log("  Recharts:", window.Recharts ? "✅" : "❌");
+    </script>
   </head>
 
-  <body class="bg-gray-100">
-    <div id="root"></div>
+  <body class="bg-gray-100 min-h-screen">
+    <div id="root">
+      <!-- Initial loading state -->
+      <div class="p-10 flex justify-center items-center min-h-screen">
+        <div class="text-slate-400 flex flex-col items-center gap-3">
+          <svg class="animate-spin h-8 w-8" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span class="text-sm">Loading Bitcoin AI Analyst...</span>
+        </div>
+      </div>
+    </div>
 
-    <!-- Your app code (the big file you pasted: btc.jsx) -->
-    <script
-      type="text/babel"
-      data-presets="env,react"
-      src="btc.jsx">
-    </script>
+    <!-- 
+      Module Loading Order:
+      1. config.js    - Configuration and constants
+      2. utils.js     - Math and formatting utilities
+      3. api.js       - Data fetching (depends on config, utils)
+      4. analysis.js  - Technical analysis (depends on config, utils)
+      5. components.jsx - React components (depends on utils)
+      6. app.jsx      - Main application (depends on all above)
+    -->
+
+    <!-- Config Module -->
+    <script src="js/config.js"></script>
+
+    <!-- Utils Module -->
+    <script src="js/utils.js"></script>
+
+    <!-- API Module -->
+    <script src="js/api.js"></script>
+
+    <!-- Analysis Module -->
+    <script src="js/analysis.js"></script>
+
+    <!-- Components (JSX - needs Babel) -->
+    <script type="text/babel" data-presets="env,react" src="js/components.jsx"></script>
+
+    <!-- Main App (JSX - needs Babel) -->
+    <script type="text/babel" data-presets="env,react" src="js/app.jsx"></script>
   </body>
 </html>
